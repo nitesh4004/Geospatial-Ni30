@@ -3,15 +3,6 @@ import ee
 import json
 import geemap.foliumap as geemap
 import xml.etree.ElementTree as ET
-import re
-import requests
-import matplotlib.pyplot as plt
-import matplotlib.colors as mcolors
-from matplotlib.patches import Rectangle
-from io import BytesIO
-from PIL import Image
-from datetime import datetime, timedelta
-import numpy as np
 
 # --- 1. PAGE CONFIG ---
 st.set_page_config(
@@ -444,3 +435,4 @@ else:
             m.addLayer(final_img, vis, f"{p['idx']} ({sel_date})")
             m.add_colorbar(vis, label=p['idx'])
             m.to_streamlit()
+
