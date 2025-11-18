@@ -21,77 +21,124 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# --- 2. CSS STYLING ---
+# --- 2. CSS STYLING (DARK MODE ENFORCED) ---
 st.markdown("""
     <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&display=swap');
     html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
-    .stApp { background-color: #f8fafc; }
-    section[data-testid="stSidebar"] { background-color: #0f172a; }
-    section[data-testid="stSidebar"] * { color: #f8fafc !important; }
-    section[data-testid="stSidebar"] .stTextInput > div > div,
-    section[data-testid="stSidebar"] .stNumberInput > div > div,
-    section[data-testid="stSidebar"] .stSelectbox > div > div,
-    section[data-testid="stSidebar"] .stDateInput > div > div {
-        background-color: #1e293b !important;
+    
+    /* Main App Background */
+    .stApp { 
+        background-color: #0f172a; 
+        color: #f8fafc; 
+    }
+    
+    /* Sidebar Background */
+    section[data-testid="stSidebar"] { 
+        background-color: #1e293b; 
+        border-right: 1px solid #334155;
+    }
+    
+    /* Text Colors */
+    h1, h2, h3, h4, h5, h6, p, span, label, .stMarkdown {
+        color: #f8fafc !important;
+    }
+    
+    /* Input Fields (Global Dark Mode) */
+    .stTextInput > div > div, 
+    .stNumberInput > div > div, 
+    .stSelectbox > div > div, 
+    .stDateInput > div > div {
+        background-color: #334155 !important;
         color: #ffffff !important;
         border: 1px solid #475569 !important;
     }
-    section[data-testid="stSidebar"] svg { fill: #ffffff !important; }
+    
+    /* Dropdowns & SVGs */
+    div[data-baseweb="select"] > div {
+        background-color: #334155 !important;
+        color: #ffffff !important;
+    }
+    svg { fill: #ffffff !important; }
+    
+    /* Custom Cards */
     .control-card {
-        background: white; padding: 15px; border-radius: 8px;
-        border: 1px solid #e2e8f0; box-shadow: 0 1px 3px rgba(0,0,0,0.05); margin-bottom: 15px;
+        background: #1e293b; 
+        padding: 15px; 
+        border-radius: 8px;
+        border: 1px solid #334155; 
+        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.5); 
+        margin-bottom: 15px;
     }
     .card-header {
-        font-size: 0.75rem; text-transform: uppercase; font-weight: 700;
-        color: #64748b; margin-bottom: 8px; border-bottom: 1px solid #f1f5f9; padding-bottom: 5px;
+        font-size: 0.75rem; 
+        text-transform: uppercase; 
+        font-weight: 700;
+        color: #94a3b8; 
+        margin-bottom: 8px; 
+        border-bottom: 1px solid #334155; 
+        padding-bottom: 5px;
     }
+    
+    /* Navbar */
     .navbar {
-        background: white; padding: 0.8rem 1.5rem; border-radius: 10px;
-        box-shadow: 0 2px 5px rgba(0,0,0,0.05); margin-bottom: 20px;
-        border: 1px solid #e2e8f0; display: flex; justify-content: space-between;
+        background: #1e293b; 
+        padding: 0.8rem 1.5rem; 
+        border-radius: 10px;
+        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.5); 
+        margin-bottom: 20px;
+        border: 1px solid #334155; 
+        display: flex; 
+        justify-content: space-between;
+        align-items: center;
     }
-    .navbar-title { font-size: 1.2rem; font-weight: 700; color: #0f172a; }
+    .navbar-title { 
+        font-size: 1.2rem; 
+        font-weight: 700; 
+        color: #f8fafc; 
+    }
+    
+    /* Buttons */
     div.stButton > button:first-child {
-        background-color: #2563eb; color: white; border-radius: 6px; border: none;
-        padding: 0.5rem; font-weight: 600; width: 100%;
+        background-color: #3b82f6; 
+        color: white; 
+        border-radius: 6px; 
+        border: none;
+        padding: 0.5rem; 
+        font-weight: 600; 
+        width: 100%;
+        transition: background-color 0.2s;
     }
-    div.stButton > button:first-child:hover { background-color: #1d4ed8; }
+    div.stButton > button:first-child:hover { background-color: #2563eb; }
+    
+    /* Toast */
+    div[data-testid="stToast"] {
+        background-color: #1e293b !important;
+        color: #f8fafc !important;
+        border: 1px solid #334155;
+    }
     </style>
     """, unsafe_allow_html=True)
 
 # --- 3. AUTHENTICATION (FIXED) ---
 try:
-    # 1. Fetch the secrets
     service_account = st.secrets["gcp_service_account"]["client_email"]
-    
-    # 2. THE FIX: Convert the secret object back into a JSON string
-    # Streamlit gives us an 'AttrDict', but Earth Engine wants a 'String'
     secret_dict = dict(st.secrets["gcp_service_account"])
     key_data = json.dumps(secret_dict) 
-    
-    # 3. Authenticate using the string
-    credentials = ee.ServiceAccountCredentials(
-        service_account, 
-        key_data=key_data
-    )
+    credentials = ee.ServiceAccountCredentials(service_account, key_data=key_data)
     ee.Initialize(credentials)
-    
 except Exception as e:
-    # Fallback for Local Run (Laptop)
     try:
         ee.Initialize()
     except Exception as e_inner:
         st.error(f"⚠️ Authentication Error: {e}")
-        st.code(str(e)) # Show exact error to help debug
-        st.info("Did you paste the Secrets correctly in the Streamlit Dashboard?")
         st.stop()
 
 if 'calculated' not in st.session_state: st.session_state['calculated'] = False
 if 'dates' not in st.session_state: st.session_state['dates'] = []
 if 'roi' not in st.session_state: st.session_state['roi'] = None
 
-# --- 4. FUNCTIONS (With Caching for Speed) ---
+# --- 4. FUNCTIONS ---
 def parse_kml(content):
     try:
         if isinstance(content, bytes): content = content.decode('utf-8')
@@ -109,9 +156,8 @@ def process_coords(text):
     coords = [[float(x.split(',')[0]), float(x.split(',')[1])] for x in raw if len(x.split(',')) >= 2]
     return ee.Geometry.Polygon([coords]) if len(coords) > 2 else None
 
-@st.cache_data(ttl=3600)
+# NOTE: Removed @st.cache_data here because ee.Image is not hashable
 def compute_index(img, platform, index, formula=None):
-    # Note: We cannot cache the EE object directly easily, but we cache the logic result
     if platform == "Sentinel-2 (Optical)":
         if index == '🛠️ Custom (Band Math)':
             map_b = {'B1':img.select('B1'), 'B2':img.select('B2'), 'B3':img.select('B3'), 'B4':img.select('B4'), 
@@ -125,14 +171,7 @@ def compute_index(img, platform, index, formula=None):
         if index == 'VH/VV Ratio': return img.select('VH').subtract(img.select('VV')).rename('Ratio')
     return img.select(0)
 
-# Optimized to be faster (lower DPI)
-@st.cache_data(ttl=3600)
-def generate_static_map_img(vis_params, roi_bounds, dimensions=800):
-    # Dummy function logic to fix caching - we can't cache EE objects well
-    pass
-
 def generate_static_map_display(image, roi, vis_params, title, cmap_colors):
-    # Request smaller thumbnail for speed
     thumb_url = image.getThumbURL({
         'min': vis_params['min'], 'max': vis_params['max'],
         'palette': vis_params['palette'], 'region': roi,
@@ -148,31 +187,42 @@ def generate_static_map_display(image, roi, vis_params, title, cmap_colors):
     deg_to_m = 111320 * np.cos(np.radians(center_lat))
     width_m = (max_lon - min_lon) * deg_to_m
     
-    # Lower DPI for speed (80 instead of default)
-    fig, ax = plt.subplots(figsize=(8, 8), dpi=80)
+    # --- Dark Mode Plot ---
+    fig, ax = plt.subplots(figsize=(8, 8), dpi=80, facecolor='#1e293b')
+    ax.set_facecolor('#1e293b')
+    
     ax.imshow(img_pil)
     ax.axis('off')
-    ax.set_title(title, fontsize=12, fontweight='bold', pad=10)
+    ax.set_title(title, fontsize=12, fontweight='bold', pad=10, color='#f8fafc')
     
     img_w_px = img_pil.width
     scale_bar_px = img_w_px * 0.2
     scale_bar_m = width_m * 0.2
     scale_text = f"{scale_bar_m/1000:.1f} km" if scale_bar_m > 1000 else f"{int(scale_bar_m)} m"
     bar_x, bar_y = img_w_px * 0.05, img_pil.height * 0.95
+    
     ax.add_patch(Rectangle((bar_x, bar_y - 5), scale_bar_px, 10, color='white'))
     ax.add_patch(Rectangle((bar_x, bar_y - 2), scale_bar_px, 4, color='black'))
-    ax.text(bar_x + scale_bar_px/2, bar_y - 15, scale_text, ha='center', color='black', fontsize=10, weight='bold', bbox=dict(facecolor='white', alpha=0.7, edgecolor='none', pad=1))
+    
+    ax.text(bar_x + scale_bar_px/2, bar_y - 15, scale_text, ha='center', 
+            color='#f8fafc', fontsize=10, weight='bold', 
+            bbox=dict(facecolor='#0f172a', alpha=0.8, edgecolor='none', pad=2))
 
     cmap = mcolors.LinearSegmentedColormap.from_list("custom", cmap_colors)
     norm = mcolors.Normalize(vmin=vis_params['min'], vmax=vis_params['max'])
     sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
     sm.set_array([])
+    
     cax = fig.add_axes([0.92, 0.15, 0.03, 0.7])
     cbar = plt.colorbar(sm, cax=cax)
-    cbar.set_label('Index Value', fontsize=10)
+    
+    cbar.set_label('Index Value', fontsize=10, color='#f8fafc')
+    cbar.ax.yaxis.set_tick_params(color='#f8fafc')
+    plt.setp(plt.getp(cbar.ax.axes, 'yticklabels'), color='#f8fafc')
+    cbar.outline.set_edgecolor('#334155')
     
     buf = BytesIO()
-    plt.savefig(buf, format='jpg', bbox_inches='tight')
+    plt.savefig(buf, format='jpg', bbox_inches='tight', facecolor='#1e293b')
     buf.seek(0)
     plt.close(fig)
     return buf
@@ -204,7 +254,6 @@ with st.sidebar:
             if min_lon < max_lon: new_roi = ee.Geometry.Rectangle([min_lon, min_lat, max_lon, max_lat])
 
         if new_roi:
-            # Reset if ROI changes
             if st.session_state['roi'] is None or new_roi.getInfo() != st.session_state['roi'].getInfo():
                 st.session_state['roi'] = new_roi
                 st.session_state['calculated'] = False
@@ -268,7 +317,7 @@ with st.sidebar:
 st.markdown("""
 <div class="navbar">
     <div class="navbar-title">Geospatial Ni30</div>
-    <div style="color:#64748b; font-size:0.9rem;">Real-time Satellite Analysis</div>
+    <div style="color:#94a3b8; font-size:0.9rem;">Real-time Satellite Analysis</div>
 </div>
 """, unsafe_allow_html=True)
 
@@ -294,27 +343,22 @@ else:
                    .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VV')))
             if p['orbit'] != "BOTH": col = col.filter(ee.Filter.eq('orbitProperties_pass', p['orbit']))
 
-        # Add bands
         processed = col.map(lambda img: img.addBands(compute_index(img, p['platform'], p['idx'], p['formula'])))
         
         if not st.session_state['dates']:
             cnt = processed.size().getInfo()
             if cnt > 0:
-                # Limit to first 20 dates to prevent slowdowns in Series mode
                 dates_list = processed.aggregate_array('system:time_start').map(
                     lambda t: ee.Date(t).format('YYYY-MM-dd')).distinct().sort()
-                st.session_state['dates'] = dates_list.slice(0, 50).getInfo() # Slice for safety
+                st.session_state['dates'] = dates_list.slice(0, 50).getInfo()
             else:
                 st.warning("No images found.")
                 st.session_state['calculated'] = False
 
     if st.session_state['dates']:
         dates = st.session_state['dates']
-        
-        # --- LAYOUT COLUMNS ---
         col_map, col_controls = st.columns([3, 1])
         
-        # --- RIGHT COLUMN (CONTROLS) ---
         with col_controls:
             st.markdown('<div class="control-card">', unsafe_allow_html=True)
             st.markdown('<div class="card-header">📅 Select Date</div>', unsafe_allow_html=True)
@@ -325,10 +369,9 @@ else:
                 sel_date = p['start']
                 st.info(f"Single Date: {sel_date}")
                 
-            st.markdown(f"<div style='font-size:0.8rem; color:#64748b; margin-top:5px;'>{len(dates)} available</div>", unsafe_allow_html=True)
+            st.markdown(f"<div style='font-size:0.8rem; color:#94a3b8; margin-top:5px;'>{len(dates)} available</div>", unsafe_allow_html=True)
             st.markdown('</div>', unsafe_allow_html=True)
 
-            # Logic
             d_s = sel_date
             d_e = (datetime.strptime(sel_date, "%Y-%m-%d") + timedelta(1)).strftime("%Y-%m-%d")
             band = 'Custom' if 'Custom' in p['idx'] else p['idx'].split()[0]
@@ -353,12 +396,10 @@ else:
             st.markdown("---")
             if st.button("🎨 Generate Map (JPG)", use_container_width=True):
                 with st.spinner("Generating..."):
-                    # Using the new display function
                     buf = generate_static_map_display(final_img, roi, vis, f"{p['idx']} - {sel_date}", p['palette'])
                     st.download_button("⬇️ Download JPG", buf, f"Map_{sel_date}.jpg", "image/jpeg", use_container_width=True)
             st.markdown('</div>', unsafe_allow_html=True)
 
-        # --- LEFT COLUMN (MAP) ---
         with col_map:
             m = geemap.Map(height=700, basemap="HYBRID")
             m.centerObject(roi, 13)
