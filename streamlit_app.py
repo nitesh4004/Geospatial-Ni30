@@ -170,16 +170,37 @@ def process_coords(text):
 
 def compute_index(img, platform, index, formula=None):
     if platform == "Sentinel-2 (Optical)":
+        # 1. Custom Band Math
         if index == '🛠️ Custom (Band Math)':
-            map_b = {'B1':img.select('B1'), 'B2':img.select('B2'), 'B3':img.select('B3'), 'B4':img.select('B4'), 
-                     'B8':img.select('B8'), 'B11':img.select('B11'), 'B12':img.select('B12')}
+            # Added more bands (Red Edge, etc) for advanced custom formulas
+            map_b = {
+                'B1':img.select('B1'), 'B2':img.select('B2'), 'B3':img.select('B3'), 'B4':img.select('B4'), 
+                'B5':img.select('B5'), 'B6':img.select('B6'), 'B7':img.select('B7'),
+                'B8':img.select('B8'), 'B8A':img.select('B8A'), 
+                'B11':img.select('B11'), 'B12':img.select('B12')
+            }
             return img.expression(formula, map_b).rename('Custom')
-        map_i = {'NDVI': ['B8','B4'], 'GNDVI': ['B8','B3'], 'NDWI (Water)': ['B3','B8'], 'NDMI': ['B8','B11']}
-        if index in map_i: return img.normalizedDifference(map_i[index]).rename(index.split()[0])
+        
+        # 2. RVI (Simple Ratio, not normalized)
+        if index == 'RVI':
+            # RVI = NIR / RED
+            return img.select('B8').divide(img.select('B4')).rename('RVI')
+
+        # 3. Normalized Indices
+        map_i = {
+            'NDVI': ['B8','B4'], 
+            'GNDVI': ['B8','B3'], 
+            'NDWI (Water)': ['B3','B8'], 
+            'NDMI': ['B8','B11']
+        }
+        if index in map_i: 
+            return img.normalizedDifference(map_i[index]).rename(index.split()[0])
+
     elif platform == "Sentinel-1 (Radar)":
         if index == 'VV': return img.select('VV')
         if index == 'VH': return img.select('VH')
         if index == 'VH/VV Ratio': return img.select('VH').subtract(img.select('VV')).rename('Ratio')
+    
     return img.select(0)
 
 def generate_static_map_display(image, roi, vis_params, title, cmap_colors):
@@ -272,19 +293,37 @@ with st.sidebar:
 
     with st.expander("🛰️ Configuration", expanded=True):
         platform = st.selectbox("Satellite", ["Sentinel-2 (Optical)", "Sentinel-1 (Radar)"])
+        
         if platform == "Sentinel-2 (Optical)":
-            idx = st.selectbox("Index", ['NDVI', 'GNDVI', 'NDWI (Water)', 'NDMI', '🛠️ Custom (Band Math)'])
-            formula = st.text_input("Formula", "(B8-B4)/(B8+B4)") if 'Custom' in idx else ""
-            vmin, vmax = (0.0, 0.8)
-            pal_name = "Red-Yellow-Green"
-            if 'Water' in idx: vmin, vmax, pal_name = -0.5, 0.5, "Blue-White-Green"
+            # Added RVI to the list
+            idx = st.selectbox("Index", ['NDVI', 'GNDVI', 'RVI', 'NDWI (Water)', 'NDMI', '🛠️ Custom (Band Math)'])
             
+            # Dynamic Defaults based on selection
+            if 'Custom' in idx:
+                formula = st.text_input("Formula (e.g. B8/B4)", "(B8-B4)/(B8+B4)")
+                default_min, default_max = 0.0, 1.0
+                pal_name = "Viridis"
+            elif 'RVI' in idx:
+                formula = ""
+                # RVI goes from 0 to infinity, usually healthy veg is 2-8
+                default_min, default_max = 0.0, 10.0 
+                pal_name = "Red-Yellow-Green"
+            elif 'Water' in idx:
+                formula = ""
+                default_min, default_max = -0.5, 0.5
+                pal_name = "Blue-White-Green"
+            else:
+                formula = ""
+                default_min, default_max = 0.0, 0.8
+                pal_name = "Red-Yellow-Green"
+
             c1, c2 = st.columns(2)
-            vmin = c1.number_input("Min", vmin)
-            vmax = c2.number_input("Max", vmax)
-            pal_name = st.selectbox("Palette", ["Red-Yellow-Green", "Blue-White-Green", "Magma", "Viridis"])
+            vmin = c1.number_input("Min", value=default_min)
+            vmax = c2.number_input("Max", value=default_max)
+            pal_name = st.selectbox("Palette", ["Red-Yellow-Green", "Blue-White-Green", "Magma", "Viridis"], index=["Red-Yellow-Green", "Blue-White-Green", "Magma", "Viridis"].index(pal_name))
             cloud = st.slider("Cloud %", 0, 30, 10)
             orbit = None
+            
         else:
             idx = st.selectbox("Pol", ['VV', 'VH', 'VH/VV Ratio'])
             vmin, vmax = -25, -5
@@ -302,7 +341,6 @@ with st.sidebar:
     }
     cur_palette = pal_map.get(pal_name, pal_map["Red-Yellow-Green"])
 
-    # --- REVISED TIME SECTION (REMOVED SINGLE DATE) ---
     with st.expander("📅 Time Range", expanded=True):
         st.caption("Select the analysis period:")
         start = st.date_input("Start Date", datetime.now()-timedelta(60)).strftime("%Y-%m-%d")
@@ -331,12 +369,14 @@ st.markdown("""
 # --- ABOUT SECTION ---
 with st.expander("ℹ️ About Geospatial Ni30 - Real-time Satellite Analytics"):
     st.markdown("""
-    **Geospatial Ni30** is a powerful web application built with Streamlit and Google Earth Engine (GEE) that allows users to perform real-time satellite analysis without writing code. It supports both Optical (Sentinel-2) and Radar (Sentinel-1) data.
+    **Geospatial Ni30** is a powerful web application built with Streamlit and Google Earth Engine (GEE) that allows users to perform real-time satellite analysis without writing code.
     
     ### 🚀 Features
     * **Multi-Sensor Support**: Switch between Sentinel-2 (Optical) and Sentinel-1 (SAR/Radar).
-    * **Spectral Indices**: Calculate NDVI, GNDVI, NDWI (Water), and NDMI instantly.
-    * **Custom Band Math**: Write your own formulas.
+    * **Spectral Indices**: 
+        * Standard: NDVI, GNDVI, NDWI, NDMI.
+        * **New:** RVI (Ratio Vegetation Index).
+    * **Custom Band Math**: Create custom formulas using B1-B12 (e.g., `(B8-B4)/(B8+B4)`).
     * **Flexible ROI**: Upload KML, Point & Buffer, or Manual Coordinates.
     * **Time-Series Analysis**: View available satellite imagery over a date range.
     * **Export Capabilities**: Download GeoTIFF, Save to Drive, or Generate JPG Map.
@@ -384,7 +424,6 @@ else:
             st.markdown('<div class="control-card">', unsafe_allow_html=True)
             st.markdown('<div class="card-header">📅 Select Date</div>', unsafe_allow_html=True)
             
-            # Only one mode now: Select from list
             sel_date = st.selectbox("Available Images", dates, index=len(dates)-1, label_visibility="collapsed")
             
             st.markdown(f"<div style='font-size:0.8rem; color:#94a3b8; margin-top:5px;'>{len(dates)} available</div>", unsafe_allow_html=True)
