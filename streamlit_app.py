@@ -1,5 +1,6 @@
 import streamlit as st
 import ee
+import json
 import geemap.foliumap as geemap
 import xml.etree.ElementTree as ET
 import re
@@ -359,3 +360,4 @@ else:
             m.addLayer(final_img, vis, f"{p['idx']} ({sel_date})")
             m.add_colorbar(vis, label=p['idx'])
             m.to_streamlit()
+
