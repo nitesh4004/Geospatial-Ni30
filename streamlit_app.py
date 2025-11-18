@@ -21,10 +21,16 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# --- 2. CSS STYLING (DARK MODE ENFORCED) ---
+# --- 2. CSS STYLING (STRICT DARK MODE ENFORCEMENT) ---
 st.markdown("""
     <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&display=swap');
+    
+    /* FORCE BROWSER DARK MODE FOR NATIVE CONTROLS (Scrollbars, Datepickers) */
+    :root {
+        color-scheme: dark;
+    }
+
     html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
     
     /* Main App Background */
@@ -39,12 +45,12 @@ st.markdown("""
         border-right: 1px solid #334155;
     }
     
-    /* Text Colors */
-    h1, h2, h3, h4, h5, h6, p, span, label, .stMarkdown {
+    /* Text Colors - Force White/Light Grey */
+    h1, h2, h3, h4, h5, h6, p, span, label, .stMarkdown, .stText {
         color: #f8fafc !important;
     }
     
-    /* Input Fields (Global Dark Mode) */
+    /* Input Fields & Widgets */
     .stTextInput > div > div, 
     .stNumberInput > div > div, 
     .stSelectbox > div > div, 
@@ -54,11 +60,13 @@ st.markdown("""
         border: 1px solid #475569 !important;
     }
     
-    /* Dropdowns & SVGs */
+    /* Dropdown Menu Items */
     div[data-baseweb="select"] > div {
         background-color: #334155 !important;
         color: #ffffff !important;
     }
+    
+    /* SVG Icons (often black by default in light mode) */
     svg { fill: #ffffff !important; }
     
     /* Custom Cards */
@@ -74,7 +82,7 @@ st.markdown("""
         font-size: 0.75rem; 
         text-transform: uppercase; 
         font-weight: 700;
-        color: #94a3b8; 
+        color: #94a3b8 !important; 
         margin-bottom: 8px; 
         border-bottom: 1px solid #334155; 
         padding-bottom: 5px;
@@ -101,7 +109,7 @@ st.markdown("""
     /* Buttons */
     div.stButton > button:first-child {
         background-color: #3b82f6; 
-        color: white; 
+        color: white !important; 
         border-radius: 6px; 
         border: none;
         padding: 0.5rem; 
@@ -111,11 +119,21 @@ st.markdown("""
     }
     div.stButton > button:first-child:hover { background-color: #2563eb; }
     
-    /* Toast */
+    /* Toast Notification */
     div[data-testid="stToast"] {
         background-color: #1e293b !important;
         color: #f8fafc !important;
         border: 1px solid #334155;
+    }
+    
+    /* Scrollbar Customization (Webkit) */
+    ::-webkit-scrollbar {
+        width: 10px;
+        background: #0f172a;
+    }
+    ::-webkit-scrollbar-thumb {
+        background: #334155;
+        border-radius: 5px;
     }
     </style>
     """, unsafe_allow_html=True)
@@ -426,4 +444,3 @@ else:
             m.addLayer(final_img, vis, f"{p['idx']} ({sel_date})")
             m.add_colorbar(vis, label=p['idx'])
             m.to_streamlit()
-
