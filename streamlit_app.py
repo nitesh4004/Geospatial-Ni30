@@ -94,7 +94,7 @@ st.markdown("""
         padding: 0.8rem 1.5rem; 
         border-radius: 10px;
         box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.5); 
-        margin-bottom: 20px;
+        margin-bottom: 20px; 
         border: 1px solid #334155; 
         display: flex; 
         justify-content: space-between;
@@ -168,6 +168,30 @@ def process_coords(text):
     coords = [[float(x.split(',')[0]), float(x.split(',')[1])] for x in raw if len(x.split(',')) >= 2]
     return ee.Geometry.Polygon([coords]) if len(coords) > 2 else None
 
+def preprocess_landsat(img):
+    """Scales Landsat Collection 2 to Surface Reflectance (0-1) and renames bands."""
+    # Scale factors for Collection 2
+    opticalBands = img.select('SR_B.').multiply(0.0000275).add(-0.2)
+    thermalBands = img.select('ST_B.*').multiply(0.00341802).add(149.0)
+    
+    # Replace original bands with scaled bands
+    return img.addBands(opticalBands, None, True).addBands(thermalBands, None, True)
+
+def rename_landsat_bands(img, platform):
+    """Renames SR_B* to B* for easier custom formulas."""
+    if "8/9" in platform:
+        # L8/9: SR_B1=Coastal, SR_B2=Blue, SR_B3=Green, SR_B4=Red, SR_B5=NIR, SR_B6=SWIR1, SR_B7=SWIR2
+        name_map = {'SR_B1':'B1', 'SR_B2':'B2', 'SR_B3':'B3', 'SR_B4':'B4', 'SR_B5':'B5', 'SR_B6':'B6', 'SR_B7':'B7'}
+    else:
+        # L7: SR_B1=Blue, SR_B2=Green, SR_B3=Red, SR_B4=NIR, SR_B5=SWIR1, SR_B7=SWIR2
+        name_map = {'SR_B1':'B1', 'SR_B2':'B2', 'SR_B3':'B3', 'SR_B4':'B4', 'SR_B5':'B5', 'SR_B7':'B7'}
+    
+    # Select only bands present in the image that match our map
+    bands_to_rename = [b for b in name_map.keys() if b in img.bandNames().getInfo()]
+    if bands_to_rename:
+        return img.select(bands_to_rename, [name_map[b] for b in bands_to_rename])
+    return img
+
 def compute_index(img, platform, index, formula=None):
     if platform == "Sentinel-2 (Optical)":
         if index == '🛠️ Custom (Band Math)':
@@ -179,7 +203,6 @@ def compute_index(img, platform, index, formula=None):
             }
             return img.expression(formula, map_b).rename('Custom')
         
-        # Standard Optical Indices
         map_i = {
             'NDVI': ['B8','B4'], 
             'GNDVI': ['B8','B3'], 
@@ -189,16 +212,45 @@ def compute_index(img, platform, index, formula=None):
         if index in map_i: 
             return img.normalizedDifference(map_i[index]).rename(index.split()[0])
 
+    elif "Landsat" in platform:
+        # Bands have been renamed to B1, B2, B3... by rename_landsat_bands function
+        # Landsat 8/9: Blue=B2, Green=B3, Red=B4, NIR=B5, SWIR1=B6, SWIR2=B7
+        # Landsat 7:   Blue=B1, Green=B2, Red=B3, NIR=B4, SWIR1=B5, SWIR2=B7
+        
+        is_l8_9 = "8/9" in platform
+        
+        if index == '🛠️ Custom (Band Math)':
+            # Just map all available B* bands
+            bands = img.bandNames().getInfo()
+            map_b = {b: img.select(b) for b in bands if b.startswith('B')}
+            return img.expression(formula, map_b).rename('Custom')
+
+        if is_l8_9:
+            map_i = {
+                'NDVI': ['B5','B4'],   # NIR, Red
+                'GNDVI': ['B5','B3'],  # NIR, Green
+                'NDWI (Water)': ['B3','B5'], # Green, NIR (McFeeters)
+                'NDMI': ['B5','B6']    # NIR, SWIR1
+            }
+        else: # Landsat 7
+            map_i = {
+                'NDVI': ['B4','B3'],   # NIR, Red
+                'GNDVI': ['B4','B2'],  # NIR, Green
+                'NDWI (Water)': ['B2','B4'], # Green, NIR
+                'NDMI': ['B4','B5']    # NIR, SWIR1
+            }
+            
+        if index in map_i:
+            return img.normalizedDifference(map_i[index]).rename(index.split()[0])
+
     elif platform == "Sentinel-1 (Radar)":
-        # Sentinel-1 Custom Band Math
         if index == '🛠️ Custom (Band Math)':
             map_b = {'VV': img.select('VV'), 'VH': img.select('VH')}
             return img.expression(formula, map_b).rename('Custom')
 
-        # Standard Polarizations
         if index == 'VV': return img.select('VV')
         if index == 'VH': return img.select('VH')
-        if index == 'VH/VV Ratio': return img.select('VH').subtract(img.select('VV')).rename('Ratio') # This is for dB
+        if index == 'VH/VV Ratio': return img.select('VH').subtract(img.select('VV')).rename('Ratio')
     
     return img.select(0)
 
@@ -291,13 +343,31 @@ with st.sidebar:
                 st.toast("ROI Updated", icon="✅")
 
     with st.expander("🛰️ Configuration", expanded=True):
-        platform = st.selectbox("Satellite", ["Sentinel-2 (Optical)", "Sentinel-1 (Radar)"])
+        platform = st.selectbox("Satellite", [
+            "Sentinel-2 (Optical)", 
+            "Landsat 8/9 (Optical)", 
+            "Landsat 7 (Optical)",
+            "Sentinel-1 (Radar)"
+        ])
         
-        if platform == "Sentinel-2 (Optical)":
+        is_optical = "Optical" in platform
+        
+        if is_optical:
             idx = st.selectbox("Index", ['NDVI', 'GNDVI', 'NDWI (Water)', 'NDMI', '🛠️ Custom (Band Math)'])
             
             if 'Custom' in idx:
-                formula = st.text_input("Formula (e.g. B8/B4)", "(B8-B4)/(B8+B4)")
+                if "Landsat 8/9" in platform:
+                    hint = "Hint: B2=Blue, B3=Green, B4=Red, B5=NIR"
+                    def_form = "(B5-B4)/(B5+B4)"
+                elif "Landsat 7" in platform:
+                    hint = "Hint: B1=Blue, B2=Green, B3=Red, B4=NIR"
+                    def_form = "(B4-B3)/(B4+B3)"
+                else: # Sentinel 2
+                    hint = "Hint: B2=Blue, B3=Green, B4=Red, B8=NIR"
+                    def_form = "(B8-B4)/(B8+B4)"
+                    
+                st.caption(hint)
+                formula = st.text_input("Formula", def_form)
                 default_min, default_max = 0.0, 1.0
                 pal_name = "Viridis"
             elif 'Water' in idx:
@@ -318,7 +388,6 @@ with st.sidebar:
             
         else:
             # Sentinel-1 Options
-            # Removed RVI from list below
             idx = st.selectbox("Index", ['VV', 'VH', 'VH/VV Ratio', '🛠️ Custom (Band Math)'])
             
             if 'Custom' in idx:
@@ -382,13 +451,15 @@ with st.expander("ℹ️ About Geospatial Ni30 - Real-time Satellite Analytics")
     **Geospatial Ni30** is a powerful web application built with Streamlit and Google Earth Engine (GEE) that allows users to perform real-time satellite analysis without writing code.
     
     ### 🚀 Features
-    * **Multi-Sensor Support**: Switch between Sentinel-2 (Optical) and Sentinel-1 (SAR/Radar).
+    * **Multi-Sensor Support**: 
+        * **Sentinel-2**: 10m High Res Optical.
+        * **Landsat 8/9**: 30m Operational Land Imager.
+        * **Landsat 7**: 30m ETM+ (Historical).
+        * **Sentinel-1**: All-weather SAR/Radar.
     * **Spectral Indices**: 
         * Optical: NDVI, GNDVI, NDWI, NDMI.
         * **Radar**: VV, VH, VH/VV Ratio.
-    * **Custom Band Math**: 
-        * Sentinel-2: `(B8-B4)/(B8+B4)`
-        * Sentinel-1: `VH/VV`, `(4*VH)/(VV+VH)`
+    * **Custom Band Math**: Write your own formulas (e.g., `(B5-B4)/(B5+B4)`).
     * **Flexible ROI**: Upload KML, Point & Buffer, or Manual Coordinates.
     * **Export Capabilities**: Download GeoTIFF, Save to Drive, or Generate JPG Map.
     """)
@@ -409,18 +480,40 @@ else:
             col = (ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
                    .filterBounds(roi).filterDate(p['start'], p['end'])
                    .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', p['cloud'])))
+            # Process bands
+            processed = col.map(lambda img: img.addBands(compute_index(img, p['platform'], p['idx'], p['formula'])))
+            
+        elif "Landsat" in p['platform']:
+            # Landsat Selection logic
+            if "Landsat 8/9" in p['platform']:
+                l9 = ee.ImageCollection("LANDSAT/LC09/C02/T1_L2")
+                l8 = ee.ImageCollection("LANDSAT/LC08/C02/T1_L2")
+                col_raw = l9.merge(l8)
+            else: # Landsat 7
+                col_raw = ee.ImageCollection("LANDSAT/LE07/C02/T1_L2")
+            
+            # Filter
+            col = (col_raw.filterBounds(roi).filterDate(p['start'], p['end'])
+                   .filter(ee.Filter.lt('CLOUD_COVER', p['cloud'])))
+            
+            # Preprocess (Scale + Rename) + Compute Index
+            def process_landsat_step(img):
+                scaled = preprocess_landsat(img)
+                renamed = rename_landsat_bands(scaled, p['platform'])
+                return renamed.addBands(compute_index(renamed, p['platform'], p['idx'], p['formula']))
+                
+            processed = col.map(process_landsat_step)
+            
         else:
-            # For Sentinel-1, we usually need both VV and VH for RVI
-            # So we ensure the list contains 'VV'. We also hope it contains 'VH' (usually IW mode has both).
+            # Sentinel-1
             col = (ee.ImageCollection('COPERNICUS/S1_GRD')
                    .filterBounds(roi).filterDate(p['start'], p['end'])
                    .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VV')))
             
-            # S1 Orbit Filter
             if p['orbit'] != "BOTH": 
                 col = col.filter(ee.Filter.eq('orbitProperties_pass', p['orbit']))
-
-        processed = col.map(lambda img: img.addBands(compute_index(img, p['platform'], p['idx'], p['formula'])))
+            
+            processed = col.map(lambda img: img.addBands(compute_index(img, p['platform'], p['idx'], p['formula'])))
         
         if not st.session_state['dates']:
             cnt = processed.size().getInfo()
@@ -456,14 +549,14 @@ else:
             st.markdown('<div class="control-card">', unsafe_allow_html=True)
             st.markdown('<div class="card-header">📥 Exports</div>', unsafe_allow_html=True)
             try:
-                url = final_img.getDownloadURL({'scale': 10, 'region': roi, 'name': f"{band}_{sel_date}"})
+                url = final_img.getDownloadURL({'scale': 30 if "Landsat" in p['platform'] else 10, 'region': roi, 'name': f"{band}_{sel_date}"})
                 st.markdown(f"🔗 [Download GeoTIFF]({url})", unsafe_allow_html=True)
             except: st.caption("Area too large for link.")
             
             st.markdown("---")
             if st.button("☁️ Save to Drive", use_container_width=True):
                 ee.batch.Export.image.toDrive(image=final_img, description=f"{band}_{sel_date}", 
-                                              scale=10, region=roi, folder='GEE_Exports').start()
+                                              scale=30 if "Landsat" in p['platform'] else 10, region=roi, folder='GEE_Exports').start()
                 st.toast("Export Started")
                 
             st.markdown("---")
