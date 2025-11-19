@@ -29,4 +29,4 @@ Direct GeoTIFF Download URL.
 Export to Google Drive.
 
 Generate high-quality JPG maps with scale bars and legends.
-<img width="1919" height="912" alt="image" src="https://github.com/user-attachments/assets/a1d6b917-4dc2-42b9-b708-b35f0de9ebc9" />
+<img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/e9421401-5f89-480d-934d-0ed895362850" />
