@@ -169,28 +169,32 @@ def process_coords(text):
     return ee.Geometry.Polygon([coords]) if len(coords) > 2 else None
 
 def preprocess_landsat(img):
-    """Scales Landsat Collection 2 to Surface Reflectance (0-1) and renames bands."""
+    """Scales Landsat Collection 2 to Surface Reflectance (0-1)."""
     # Scale factors for Collection 2
     opticalBands = img.select('SR_B.').multiply(0.0000275).add(-0.2)
     thermalBands = img.select('ST_B.*').multiply(0.00341802).add(149.0)
     
-    # Replace original bands with scaled bands
+    # Replace original bands with scaled bands and return
     return img.addBands(opticalBands, None, True).addBands(thermalBands, None, True)
 
 def rename_landsat_bands(img, platform):
-    """Renames SR_B* to B* for easier custom formulas."""
+    """Renames SR_B* to B* using server-side logic to avoid getInfo errors."""
+    # We trust the input image to have the standard bands for the selected collection.
+    # We use implicit lists based on the platform string, which is available client-side
+    # before the map function is sent to the server.
+    
     if "8/9" in platform:
         # L8/9: SR_B1=Coastal, SR_B2=Blue, SR_B3=Green, SR_B4=Red, SR_B5=NIR, SR_B6=SWIR1, SR_B7=SWIR2
-        name_map = {'SR_B1':'B1', 'SR_B2':'B2', 'SR_B3':'B3', 'SR_B4':'B4', 'SR_B5':'B5', 'SR_B6':'B6', 'SR_B7':'B7'}
+        return img.select(
+            ['SR_B1', 'SR_B2', 'SR_B3', 'SR_B4', 'SR_B5', 'SR_B6', 'SR_B7'],
+            ['B1', 'B2', 'B3', 'B4', 'B5', 'B6', 'B7']
+        )
     else:
         # L7: SR_B1=Blue, SR_B2=Green, SR_B3=Red, SR_B4=NIR, SR_B5=SWIR1, SR_B7=SWIR2
-        name_map = {'SR_B1':'B1', 'SR_B2':'B2', 'SR_B3':'B3', 'SR_B4':'B4', 'SR_B5':'B5', 'SR_B7':'B7'}
-    
-    # Select only bands present in the image that match our map
-    bands_to_rename = [b for b in name_map.keys() if b in img.bandNames().getInfo()]
-    if bands_to_rename:
-        return img.select(bands_to_rename, [name_map[b] for b in bands_to_rename])
-    return img
+        return img.select(
+            ['SR_B1', 'SR_B2', 'SR_B3', 'SR_B4', 'SR_B5', 'SR_B7'],
+            ['B1', 'B2', 'B3', 'B4', 'B5', 'B7']
+        )
 
 def compute_index(img, platform, index, formula=None):
     if platform == "Sentinel-2 (Optical)":
@@ -213,23 +217,28 @@ def compute_index(img, platform, index, formula=None):
             return img.normalizedDifference(map_i[index]).rename(index.split()[0])
 
     elif "Landsat" in platform:
-        # Bands have been renamed to B1, B2, B3... by rename_landsat_bands function
-        # Landsat 8/9: Blue=B2, Green=B3, Red=B4, NIR=B5, SWIR1=B6, SWIR2=B7
-        # Landsat 7:   Blue=B1, Green=B2, Red=B3, NIR=B4, SWIR1=B5, SWIR2=B7
+        # Bands have been renamed to B1, B2... by rename_landsat_bands function
         
         is_l8_9 = "8/9" in platform
         
         if index == '🛠️ Custom (Band Math)':
-            # Just map all available B* bands
-            bands = img.bandNames().getInfo()
-            map_b = {b: img.select(b) for b in bands if b.startswith('B')}
+            # Just map all available B* bands using a regex select for safety in expressions
+            # We manually map the most common ones to ensure the expression works
+            map_b = {
+                'B1': img.select('B1'), 'B2': img.select('B2'), 'B3': img.select('B3'),
+                'B4': img.select('B4'), 'B5': img.select('B5'), 'B7': img.select('B7')
+            }
+            # Add B6 only if L8/9
+            if is_l8_9:
+                 map_b['B6'] = img.select('B6')
+                 
             return img.expression(formula, map_b).rename('Custom')
 
         if is_l8_9:
             map_i = {
                 'NDVI': ['B5','B4'],   # NIR, Red
                 'GNDVI': ['B5','B3'],  # NIR, Green
-                'NDWI (Water)': ['B3','B5'], # Green, NIR (McFeeters)
+                'NDWI (Water)': ['B3','B5'], # Green, NIR
                 'NDMI': ['B5','B6']    # NIR, SWIR1
             }
         else: # Landsat 7
@@ -496,7 +505,8 @@ else:
             col = (col_raw.filterBounds(roi).filterDate(p['start'], p['end'])
                    .filter(ee.Filter.lt('CLOUD_COVER', p['cloud'])))
             
-            # Preprocess (Scale + Rename) + Compute Index
+            # Define the processing function to map over the collection
+            # We must NOT call getInfo() here or inside any function called here
             def process_landsat_step(img):
                 scaled = preprocess_landsat(img)
                 renamed = rename_landsat_bands(scaled, p['platform'])
