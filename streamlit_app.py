@@ -224,6 +224,7 @@ def compute_index(img, platform, index, formula=None):
     return img.select(0)
 
 def generate_static_map_display(image, roi, vis_params, title, cmap_colors):
+    # (Function logic preserved, styling adjusted for plots)
     thumb_url = image.getThumbURL({
         'min': vis_params['min'], 'max': vis_params['max'],
         'palette': vis_params['palette'], 'region': roi,
@@ -279,26 +280,27 @@ with st.sidebar:
     
     with st.container():
         st.markdown("### 1. Target Acquisition (ROI)")
-        
-        roi_method = st.radio("Selection Mode", ["Draw on Map", "Point & Buffer", "Upload KML"], label_visibility="collapsed")
+        roi_method = st.radio("Selection Mode", ["Upload KML", "Point & Buffer", "Manual Coordinates"], label_visibility="collapsed")
         
         new_roi = None
-        
-        if roi_method == "Draw on Map":
-            st.info("Use the Polygon tool (⬠) on the main map to draw your area of interest.")
-        
-        elif roi_method == "Upload KML":
+        if roi_method == "Upload KML":
             kml = st.file_uploader("Drop KML File", type=['kml'])
             if kml:
                 kml.seek(0)
                 new_roi = parse_kml(kml.read())
-        
         elif roi_method == "Point & Buffer":
             c1, c2 = st.columns([1, 1])
             lat = c1.number_input("Lat", 20.59)
             lon = c2.number_input("Lon", 78.96)
             rad = st.number_input("Radius (km)", 5)
             if lat and lon: new_roi = ee.Geometry.Point([lon, lat]).buffer(rad*1000).bounds()
+        elif roi_method == "Manual Coordinates":
+            c1, c2 = st.columns(2)
+            min_lon = c1.number_input("Min Lon", 78.0)
+            min_lat = c2.number_input("Min Lat", 20.0)
+            max_lon = c1.number_input("Max Lon", 79.0)
+            max_lat = c2.number_input("Max Lat", 21.0)
+            if min_lon < max_lon: new_roi = ee.Geometry.Rectangle([min_lon, min_lat, max_lon, max_lat])
 
         if new_roi:
             if st.session_state['roi'] is None or new_roi.getInfo() != st.session_state['roi'].getInfo():
@@ -381,9 +383,10 @@ with st.sidebar:
             })
             st.session_state['dates'] = []
         else:
-            st.error("❌ Error: ROI not defined. Please draw on map or upload KML.")
+            st.error("❌ Error: ROI not defined.")
 
 # --- 6. MAIN CONTENT ---
+# Custom HUD Header
 st.markdown("""
 <div class="hud-header">
     <div>
@@ -412,36 +415,13 @@ if not st.session_state['calculated']:
     </div>
     """, unsafe_allow_html=True)
 
-    # Default Map with Drawing Tools
-    # FIXED: Added Esri World Imagery via URL to avoid BoxKeyError
-    m = geemap.Map(height=500) 
-    m.add_tile_layer(
-        url="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
-        name="Esri Satellite",
-        attribution="Esri"
-    )
-    
-    # If there is already a ROI stored, show it
+    # Default Map
+    m = geemap.Map(height=500, basemap="HYBRID")
     if st.session_state['roi']:
         m.centerObject(st.session_state['roi'], 12)
         m.addLayer(ee.Image().paint(st.session_state['roi'], 2, 3), {'palette': '#00f2ff'}, 'Target ROI')
-    else:
-        m.setCenter(78.96, 20.59, 5) # Default India View
-
-    # Enable Drawing Control
-    m.add_draw_control()
     
-    # Display map and capture output
-    map_output = m.to_streamlit(return_on_hover=False)
-    
-    # LOGIC TO CAPTURE DRAWN POLYGON
-    if roi_method == "Draw on Map":
-        if map_output and map_output.get('last_active_drawing'):
-            geom = map_output['last_active_drawing']['geometry']
-            if geom:
-                ee_geom = ee.Geometry.Polygon(geom['coordinates'])
-                st.session_state['roi'] = ee_geom
-                st.success("ROI Captured from Map! Ready to Initialize.")
+    m.to_streamlit()
 
 else:
     # --- PROCESSING & RESULTS ---
@@ -449,6 +429,7 @@ else:
     p = st.session_state
     
     with st.spinner("🛰️ Establishing Uplink... Processing Earth Engine Data..."):
+        # (Processing Logic Identical to original, just wrapped)
         if p['platform'] == "Sentinel-2 (Optical)":
             col = (ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
                    .filterBounds(roi).filterDate(p['start'], p['end'])
@@ -483,6 +464,7 @@ else:
     if st.session_state['dates']:
         dates = st.session_state['dates']
         
+        # --- UI LAYOUT FOR RESULTS ---
         col_map, col_data = st.columns([3, 1])
         
         with col_data:
@@ -521,13 +503,7 @@ else:
             st.markdown('</div>', unsafe_allow_html=True)
 
         with col_map:
-            # FIXED: Added Esri World Imagery via URL here as well
-            m = geemap.Map(height=700)
-            m.add_tile_layer(
-                url="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
-                name="Esri Satellite",
-                attribution="Esri"
-            )
+            m = geemap.Map(height=700, basemap="HYBRID")
             m.centerObject(roi, 13)
             m.addLayer(final_img, vis, f"{p['idx']} ({sel_date})")
             m.add_colorbar(vis, label=p['idx'], layer_name="Legend")
