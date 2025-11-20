@@ -280,14 +280,12 @@ with st.sidebar:
     with st.container():
         st.markdown("### 1. Target Acquisition (ROI)")
         
-        # REPLACED: Manual Coordinates with "Draw on Map"
         roi_method = st.radio("Selection Mode", ["Draw on Map", "Point & Buffer", "Upload KML"], label_visibility="collapsed")
         
         new_roi = None
         
         if roi_method == "Draw on Map":
             st.info("Use the Polygon tool (⬠) on the main map to draw your area of interest.")
-            # ROI logic handled in main loop via session state
         
         elif roi_method == "Upload KML":
             kml = st.file_uploader("Drop KML File", type=['kml'])
@@ -386,7 +384,6 @@ with st.sidebar:
             st.error("❌ Error: ROI not defined. Please draw on map or upload KML.")
 
 # --- 6. MAIN CONTENT ---
-# Custom HUD Header
 st.markdown("""
 <div class="hud-header">
     <div>
@@ -416,8 +413,13 @@ if not st.session_state['calculated']:
     """, unsafe_allow_html=True)
 
     # Default Map with Drawing Tools
-    # ENFORCED: Esri.WorldImagery (Satellite)
-    m = geemap.Map(height=500, basemap="Esri.WorldImagery")
+    # FIXED: Added Esri World Imagery via URL to avoid BoxKeyError
+    m = geemap.Map(height=500) 
+    m.add_tile_layer(
+        url="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+        name="Esri Satellite",
+        attribution="Esri"
+    )
     
     # If there is already a ROI stored, show it
     if st.session_state['roi']:
@@ -434,14 +436,10 @@ if not st.session_state['calculated']:
     
     # LOGIC TO CAPTURE DRAWN POLYGON
     if roi_method == "Draw on Map":
-        # Check if user drew something
         if map_output and map_output.get('last_active_drawing'):
             geom = map_output['last_active_drawing']['geometry']
             if geom:
-                # Convert GeoJSON to EE Geometry
                 ee_geom = ee.Geometry.Polygon(geom['coordinates'])
-                
-                # Update Session State
                 st.session_state['roi'] = ee_geom
                 st.success("ROI Captured from Map! Ready to Initialize.")
 
@@ -451,7 +449,6 @@ else:
     p = st.session_state
     
     with st.spinner("🛰️ Establishing Uplink... Processing Earth Engine Data..."):
-        # (Processing Logic Identical to original, just wrapped)
         if p['platform'] == "Sentinel-2 (Optical)":
             col = (ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
                    .filterBounds(roi).filterDate(p['start'], p['end'])
@@ -486,7 +483,6 @@ else:
     if st.session_state['dates']:
         dates = st.session_state['dates']
         
-        # --- UI LAYOUT FOR RESULTS ---
         col_map, col_data = st.columns([3, 1])
         
         with col_data:
@@ -525,8 +521,13 @@ else:
             st.markdown('</div>', unsafe_allow_html=True)
 
         with col_map:
-            # ENFORCED: Esri.WorldImagery (Satellite)
-            m = geemap.Map(height=700, basemap="Esri.WorldImagery")
+            # FIXED: Added Esri World Imagery via URL here as well
+            m = geemap.Map(height=700)
+            m.add_tile_layer(
+                url="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+                name="Esri Satellite",
+                attribution="Esri"
+            )
             m.centerObject(roi, 13)
             m.addLayer(final_img, vis, f"{p['idx']} ({sel_date})")
             m.add_colorbar(vis, label=p['idx'], layer_name="Legend")
