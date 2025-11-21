@@ -382,10 +382,26 @@ with st.sidebar:
             "Greyscale": ['black', 'white']
         }
         cur_palette = pal_map.get(pal_name, pal_map["Red-Yellow-Green"])
+        
+        # Initialize these to None to avoid errors in param packing later
+        uploaded_train = None
+        gh_url = None
+        data_source = None
+        n_trees = None
 
     else: # LULC MODE
         st.markdown("### 2. ML Config")
-        uploaded_train = st.file_uploader("Training Data (CSV)", type=['csv'], help="Must contain 'LULC_Type' column")
+        data_source = st.radio("Training Data Source", ["GitHub URL", "Upload CSV"], label_visibility="collapsed")
+        
+        uploaded_train = None
+        gh_url = None
+        
+        if data_source == "GitHub URL":
+            gh_url = st.text_input("Paste Raw GitHub URL", 
+                                   placeholder="https://raw.githubusercontent.com/user/repo/main/data.csv",
+                                   help="Make sure to click 'Raw' on GitHub and copy that URL.")
+        else:
+            uploaded_train = st.file_uploader("Training Data (CSV)", type=['csv'], help="Must contain 'LULC_Type' column")
         
         st.markdown("#### Model Params")
         n_trees = st.slider("Random Forest Trees", 50, 300, 200)
@@ -413,7 +429,12 @@ with st.sidebar:
                     'orbit': orbit, 'vmin': vmin, 'vmax': vmax, 'palette': cur_palette
                 })
             else:
-                params.update({'uploaded_train': uploaded_train, 'n_trees': n_trees})
+                params.update({
+                    'uploaded_train': uploaded_train, 
+                    'gh_url': gh_url,
+                    'data_source': data_source,
+                    'n_trees': n_trees
+                })
                 
             st.session_state.update(params)
             st.session_state['dates'] = [] # Reset dates for new calculation
@@ -529,16 +550,37 @@ else:
                 m.to_streamlit()
 
     # ==========================================
-    # MODE 2: LULC CLASSIFIER (NEW FEATURE)
+    # MODE 2: LULC CLASSIFIER (UPDATED GITHUB LOGIC)
     # ==========================================
     elif p['mode'] == "LULC Classifier":
-        if not p['uploaded_train']:
-            st.error("⚠️ Training Data Required. Please upload the CSV in the sidebar.")
-        else:
+        
+        # Logic to determine source
+        df = None
+        data_loaded = False
+        
+        if p['data_source'] == "GitHub URL":
+            if p['gh_url']:
+                try:
+                    # Auto-fix for common mistake: using 'blob' instead of 'raw'
+                    clean_url = p['gh_url'].replace("github.com", "raw.githubusercontent.com").replace("/blob/", "/")
+                    df = pd.read_csv(clean_url)
+                    data_loaded = True
+                except Exception as e:
+                    st.error(f"❌ Could not fetch from GitHub: {e}. Ensure the repo is public and URL is correct.")
+            else:
+                st.warning("⚠️ Please paste the GitHub URL in the sidebar.")
+                
+        elif p['data_source'] == "Upload CSV":
+            if p['uploaded_train']:
+                df = pd.read_csv(p['uploaded_train'])
+                data_loaded = True
+            else:
+                st.warning("⚠️ Please upload a CSV file in the sidebar.")
+
+        if data_loaded and df is not None:
             with st.spinner("🧠 Training Random Forest Model..."):
                 # 1. PROCESS TRAINING DATA
                 try:
-                    df = pd.read_csv(p['uploaded_train'])
                     class_names = [
                         "Dense Forest", "Open Forest", "Shrubland", "Grassland",
                         "Cropland", "Urban/Built-up", "Bare Soil", "Water Bodies",
@@ -594,6 +636,7 @@ else:
                 with col_res:
                     st.markdown('<div class="glass-card">', unsafe_allow_html=True)
                     st.markdown('<div class="card-label">🧠 MODEL METRICS</div>', unsafe_allow_html=True)
+                    st.success(f"Source: {p['data_source']}")
                     st.info(f"Training Points: {len(df)}")
                     st.info(f"Trees: {p['n_trees']}")
                     
