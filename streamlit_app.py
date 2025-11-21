@@ -7,6 +7,7 @@ import re
 import requests
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
+import matplotlib.patches as mpatches
 from io import BytesIO
 from PIL import Image
 from datetime import datetime, timedelta
@@ -132,6 +133,18 @@ st.markdown("""
         border: 1px solid rgba(255,255,255,0.1);
         box-shadow: 0 0 20px rgba(0,0,0,0.5);
     }
+    
+    /* METRIC VALUE STYLING */
+    .metric-value {
+        font-family: 'Rajdhani', sans-serif;
+        font-size: 1.5rem;
+        font-weight: 700;
+        color: #fff;
+    }
+    .metric-sub {
+        font-size: 0.8rem;
+        color: #94a3b8;
+    }
     </style>
     """, unsafe_allow_html=True)
 
@@ -241,7 +254,11 @@ def add_lulc_indices(image):
     
     return image.addBands([ndvi, evi, gndvi, ndwi, ndmi])
 
-def generate_static_map_display(image, roi, vis_params, title, cmap_colors):
+def generate_static_map_display(image, roi, vis_params, title, cmap_colors=None, is_categorical=False, class_names=None):
+    """
+    Generates a static map (JPG) for download.
+    Handles both Continuous (Spectral) and Categorical (LULC) data.
+    """
     thumb_url = image.getThumbURL({
         'min': vis_params['min'], 'max': vis_params['max'],
         'palette': vis_params['palette'], 'region': roi,
@@ -257,7 +274,21 @@ def generate_static_map_display(image, roi, vis_params, title, cmap_colors):
     ax.axis('off')
     ax.set_title(title, fontsize=14, fontweight='bold', pad=15, color='#00f2ff')
     
-    if cmap_colors:
+    # LEGEND GENERATION
+    if is_categorical and class_names and 'palette' in vis_params:
+        # Discrete Legend for LULC
+        patches = []
+        for name, color in zip(class_names, vis_params['palette']):
+            patches.append(mpatches.Patch(color=color, label=name))
+        
+        legend = ax.legend(handles=patches, loc='center left', bbox_to_anchor=(1.05, 0.5), 
+                           frameon=False, title="LULC Classes")
+        plt.setp(legend.get_title(), color='white', fontweight='bold')
+        for text in legend.get_texts():
+            text.set_color("white")
+            
+    elif cmap_colors:
+        # Continuous Colorbar for Spectral Indices
         cmap = mcolors.LinearSegmentedColormap.from_list("custom", cmap_colors)
         norm = mcolors.Normalize(vmin=vis_params['min'], vmax=vis_params['max'])
         sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
@@ -409,6 +440,8 @@ with st.sidebar:
             st.caption("Probabilistic classifier. Fast, good baseline.")
 
         cloud = st.slider("Cloud Masking %", 0, 30, 20)
+        
+        split_ratio = st.slider("Train/Validation Split", 0.5, 0.9, 0.8)
 
     st.markdown("---")
     st.markdown("### 3. Temporal Window")
@@ -429,7 +462,8 @@ with st.sidebar:
                 'rf_trees': rf_trees,
                 'svm_kernel': svm_kernel,
                 'svm_gamma': svm_gamma,
-                'gtb_trees': gtb_trees
+                'gtb_trees': gtb_trees,
+                'split_ratio': split_ratio if 'split_ratio' in locals() else 0.8
             }
             
             if mode == "Spectral Monitor":
@@ -542,7 +576,7 @@ else:
                 st.markdown("---")
                 if st.button("📷 Render Map (JPG)", use_container_width=True):
                     with st.spinner("Rendering..."):
-                        buf = generate_static_map_display(final_img, roi, vis, f"{p['idx']} | {sel_date}", p['palette'])
+                        buf = generate_static_map_display(final_img, roi, vis, f"{p['idx']} | {sel_date}", cmap_colors=p['palette'])
                         st.download_button("⬇️ Save Image", buf, f"Ni30_Map_{sel_date}.jpg", "image/jpeg", use_container_width=True)
                 st.markdown('</div>', unsafe_allow_html=True)
 
@@ -579,7 +613,12 @@ else:
                 
                 # Create Feature Collection
                 features = [ee.Feature(None, row.to_dict()) for i, row in df.iterrows()]
-                training_fc = ee.FeatureCollection(features)
+                fc_raw = ee.FeatureCollection(features)
+                
+                # 1.1 SPLIT DATA FOR VALIDATION
+                fc_with_random = fc_raw.randomColumn()
+                training_fc = fc_with_random.filter(ee.Filter.lt('random', p['split_ratio']))
+                validation_fc = fc_with_random.filter(ee.Filter.gte('random', p['split_ratio']))
                 
             except Exception as e:
                 st.error(f"❌ Data Link Error: {e}. Please contact admin.")
@@ -636,9 +675,17 @@ else:
             )
             
             lulc_class = indices_img.select(input_bands).classify(trained_classifier)
-
-            # 4. VISUALIZATION
+            
+            # 4. ACCURACY ASSESSMENT
+            validated = validation_fc.classify(trained_classifier)
+            error_matrix = validated.errorMatrix('class', 'classification')
+            
+            overall_accuracy = error_matrix.accuracy().getInfo()
+            kappa = error_matrix.kappa().getInfo()
+            
+            # 5. VISUALIZATION
             lulc_palette = ["#1A5E1A", "#387C2B", "#BDB76B", "#98FB98", "#FFD700", "#DC143C", "#D2691E", "#0000FF", "#008080", "#FFFFFF"]
+            vis_params = {"min": 0, "max": 9, "palette": lulc_palette}
             
             col_map, col_res = st.columns([3, 1])
             
@@ -646,14 +693,15 @@ else:
                 st.markdown('<div class="glass-card">', unsafe_allow_html=True)
                 st.markdown('<div class="card-label">🧠 MODEL METRICS</div>', unsafe_allow_html=True)
                 st.success(f"Architecture: {p['model_choice']}")
-                st.info(f"Training Points: {len(df)}")
                 
-                # Display specific metrics
-                if p['model_choice'] == "Random Forest":
-                    st.text(f"Trees: {p['rf_trees']}")
-                elif p['model_choice'] == "SVM":
-                    st.text(f"Kernel: {p['svm_kernel']}")
+                c_a, c_b = st.columns(2)
+                c_a.markdown(f"""<div class="metric-value">{overall_accuracy:.2%}</div><div class="metric-sub">Overall Accuracy</div>""", unsafe_allow_html=True)
+                c_b.markdown(f"""<div class="metric-value">{kappa:.3f}</div><div class="metric-sub">Kappa Coeff</div>""", unsafe_allow_html=True)
                 
+                st.markdown("---")
+                st.markdown(f"<div style='font-size:0.8rem'>Training Samples: {training_fc.size().getInfo()}</div>", unsafe_allow_html=True)
+                st.markdown(f"<div style='font-size:0.8rem'>Validation Samples: {validation_fc.size().getInfo()}</div>", unsafe_allow_html=True)
+
                 st.markdown("---")
                 st.markdown('<div class="card-label">💾 EXPORT RESULT</div>', unsafe_allow_html=True)
                 
@@ -663,6 +711,18 @@ else:
                         scale=10, region=roi, folder='GEE_Exports'
                     ).start()
                         st.toast("Export Started to GDrive")
+                
+                st.markdown("---")
+                if st.button("📷 Render Map (JPG)", key="lulc_jpg"):
+                    with st.spinner("Generating Map..."):
+                        buf = generate_static_map_display(
+                            lulc_class, roi, vis_params, 
+                            f"LULC | {p['model_choice']}", 
+                            is_categorical=True, 
+                            class_names=class_names
+                        )
+                        st.download_button("⬇️ Save Image", buf, f"Ni30_LULC_{datetime.now().date()}.jpg", "image/jpeg", use_container_width=True)
+                
                 st.markdown('</div>', unsafe_allow_html=True)
 
             with col_map:
@@ -674,10 +734,9 @@ else:
                 m.addLayer(s2_median, rgb_vis, 'RGB Composite')
                 
                 # Add LULC
-                m.addLayer(lulc_class, {"min": 0, "max": 9, "palette": lulc_palette}, f"LULC: {p['model_choice']}")
+                m.addLayer(lulc_class, vis_params, f"LULC: {p['model_choice']}")
                 
                 # Legend
                 legend_dict = dict(zip(class_names, lulc_palette))
                 m.add_legend(title="LULC Classes", legend_dict=legend_dict)
                 m.to_streamlit()
-
