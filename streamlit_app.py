@@ -588,7 +588,7 @@ else:
                 m.to_streamlit()
 
     # ==========================================
-    # MODE 2: MULTI-MODEL LULC CLASSIFIER
+    # MODE 2: MULTI-MODEL LULC CLASSIFIER (SIMPLIFIED)
     # ==========================================
     elif p['mode'] == "LULC Classifier":
         
@@ -600,15 +600,26 @@ else:
             try:
                 df = pd.read_csv(DEFAULT_TRAIN_URL)
                 
-                class_names = [
-                    "Dense Forest", "Open Forest", "Shrubland", "Grassland",
-                    "Cropland", "Urban/Built-up", "Bare Soil", "Water Bodies",
-                    "Wetland", "Snow/Ice",
-                ]
-                class_lut = dict(zip(class_names, range(len(class_names))))
+                # --- NEW SIMPLIFIED MAPPING LOGIC ---
+                # We define the 4 main classes:
+                # 0: Vegetation
+                # 1: Water Body
+                # 2: Built-up Area
+                # 3: Barren Land
                 
-                if "class" not in df.columns:
-                        df["class"] = df["LULC_Type"].map(class_lut)
+                simplified_mapping = {
+                    "Dense Forest": 0, "Open Forest": 0, "Shrubland": 0, "Grassland": 0, "Cropland": 0, "Wetland": 0, # All Green
+                    "Water Bodies": 1, "Snow/Ice": 1, # All Water
+                    "Urban/Built-up": 2, # Built Up
+                    "Bare Soil": 3 # Barren
+                }
+                
+                simple_class_names = ["Vegetation", "Water Body", "Built-up Area", "Barren Land"]
+                
+                # Apply mapping
+                df["class"] = df["LULC_Type"].map(simplified_mapping)
+                
+                # Drop any rows that didn't map (though all should match based on your data)
                 df = df.dropna(subset=["class"])
                 
                 # Create Feature Collection
@@ -684,8 +695,9 @@ else:
             kappa = error_matrix.kappa().getInfo()
             
             # 5. VISUALIZATION
-            lulc_palette = ["#1A5E1A", "#387C2B", "#BDB76B", "#98FB98", "#FFD700", "#DC143C", "#D2691E", "#0000FF", "#008080", "#FFFFFF"]
-            vis_params = {"min": 0, "max": 9, "palette": lulc_palette}
+            # 0: Vegetation (Green), 1: Water (Blue), 2: Built-up (Red), 3: Barren (Yellow/Brown)
+            lulc_palette = ["#32CD32", "#1E90FF", "#FF4500", "#F4A460"]
+            vis_params = {"min": 0, "max": 3, "palette": lulc_palette}
             
             col_map, col_res = st.columns([3, 1])
             
@@ -707,7 +719,7 @@ else:
                 
                 if st.button("☁️ Save to Drive"):
                         ee.batch.Export.image.toDrive(
-                        image=lulc_class, description=f"LULC_{p['model_choice']}_{datetime.now().strftime('%Y%m%d')}", 
+                        image=lulc_class, description=f"LULC_Simple_{p['model_choice']}_{datetime.now().strftime('%Y%m%d')}", 
                         scale=10, region=roi, folder='GEE_Exports'
                     ).start()
                         st.toast("Export Started to GDrive")
@@ -717,9 +729,9 @@ else:
                     with st.spinner("Generating Map..."):
                         buf = generate_static_map_display(
                             lulc_class, roi, vis_params, 
-                            f"LULC | {p['model_choice']}", 
+                            f"LULC (Simplified) | {p['model_choice']}", 
                             is_categorical=True, 
-                            class_names=class_names
+                            class_names=simple_class_names
                         )
                         st.download_button("⬇️ Save Image", buf, f"Ni30_LULC_{datetime.now().date()}.jpg", "image/jpeg", use_container_width=True)
                 
@@ -737,6 +749,6 @@ else:
                 m.addLayer(lulc_class, vis_params, f"LULC: {p['model_choice']}")
                 
                 # Legend
-                legend_dict = dict(zip(class_names, lulc_palette))
+                legend_dict = dict(zip(simple_class_names, lulc_palette))
                 m.add_legend(title="LULC Classes", legend_dict=legend_dict)
                 m.to_streamlit()
