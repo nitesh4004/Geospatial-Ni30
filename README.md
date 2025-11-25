@@ -32,5 +32,5 @@ Generate high-quality JPG maps with scale bars and legends.
 
 
 <img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/e9421401-5f89-480d-934d-0ed895362850" />
-<img width="1919" height="1079" alt="image" src="https://github.com/user-attachments/assets/d1ebe8ab-5781-46f8-ba1e-93a7f4b62e67" />
-
+<img width="1919" height="977" alt="Screenshot 2025-11-25 193613" src="https://github.com/user-attachments/assets/3058bae5-07ce-4184-beb0-7af9f733f712" />
+<img width="1919" height="967" alt="image" src="https://github.com/user-attachments/assets/585a50ea-b2f6-4fe8-ab17-03d2f70c236d" />
