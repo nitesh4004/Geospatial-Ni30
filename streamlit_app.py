@@ -15,8 +15,8 @@ import pandas as pd
 
 # --- 1. PAGE CONFIG ---
 st.set_page_config(
-    page_title="NI30 Orbital Analytics", 
-    page_icon="🛰️", 
+    page_title="NI30 Orbital Analytics",
+    page_icon="🛰️",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -153,7 +153,7 @@ try:
     # Attempt to use Streamlit Secrets first
     service_account = st.secrets["gcp_service_account"]["client_email"]
     secret_dict = dict(st.secrets["gcp_service_account"])
-    key_data = json.dumps(secret_dict) 
+    key_data = json.dumps(secret_dict)
     credentials = ee.ServiceAccountCredentials(service_account, key_data=key_data)
     ee.Initialize(credentials)
 except Exception:
@@ -164,22 +164,29 @@ except Exception:
         st.error(f"⚠️ Authentication Error: {e}")
         st.stop()
 
-if 'calculated' not in st.session_state: st.session_state['calculated'] = False
-if 'dates' not in st.session_state: st.session_state['dates'] = []
-if 'roi' not in st.session_state: st.session_state['roi'] = None
-if 'mode' not in st.session_state: st.session_state['mode'] = 'Spectral Monitor'
+if 'calculated' not in st.session_state:
+    st.session_state['calculated'] = False
+if 'dates' not in st.session_state:
+    st.session_state['dates'] = []
+if 'roi' not in st.session_state:
+    st.session_state['roi'] = None
+if 'mode' not in st.session_state:
+    st.session_state['mode'] = 'Spectral Monitor'
 
 # --- 4. HELPER FUNCTIONS ---
 def parse_kml(content):
     try:
-        if isinstance(content, bytes): content = content.decode('utf-8')
+        if isinstance(content, bytes):
+            content = content.decode('utf-8')
         match = re.search(r'<coordinates>(.*?)</coordinates>', content, re.DOTALL | re.IGNORECASE)
-        if match: return process_coords(match.group(1))
+        if match:
+            return process_coords(match.group(1))
         root = ET.fromstring(content)
         for elem in root.iter():
             if elem.tag.lower().endswith('coordinates') and elem.text:
                 return process_coords(elem.text)
-    except: pass
+    except Exception:
+        pass
     return None
 
 def process_coords(text):
@@ -202,29 +209,38 @@ def compute_index(img, platform, index, formula=None):
     if platform == "Sentinel-2 (Optical)":
         if index == '🛠️ Custom (Band Math)':
             map_b = {
-                'B1':img.select('B1'), 'B2':img.select('B2'), 'B3':img.select('B3'), 'B4':img.select('B4'), 
-                'B5':img.select('B5'), 'B6':img.select('B6'), 'B7':img.select('B7'),
-                'B8':img.select('B8'), 'B8A':img.select('B8A'), 
-                'B11':img.select('B11'), 'B12':img.select('B12')
+                'B1': img.select('B1'), 'B2': img.select('B2'), 'B3': img.select('B3'), 'B4': img.select('B4'),
+                'B5': img.select('B5'), 'B6': img.select('B6'), 'B7': img.select('B7'),
+                'B8': img.select('B8'), 'B8A': img.select('B8A'),
+                'B11': img.select('B11'), 'B12': img.select('B12')
             }
             return img.expression(formula, map_b).rename('Custom')
-        map_i = {'NDVI': ['B8','B4'], 'GNDVI': ['B8','B3'], 'NDWI (Water)': ['B3','B8'], 'NDMI': ['B8','B11']}
-        if index in map_i: return img.normalizedDifference(map_i[index]).rename(index.split()[0])
+        map_i = {'NDVI': ['B8', 'B4'], 'GNDVI': ['B8', 'B3'], 'NDWI (Water)': ['B3', 'B8'], 'NDMI': ['B8', 'B11']}
+        if index in map_i:
+            return img.normalizedDifference(map_i[index]).rename(index.split()[0])
 
     elif "Landsat" in platform:
         if index == '🛠️ Custom (Band Math)':
-            map_b = {'B1':img.select('B1'), 'B2':img.select('B2'), 'B3':img.select('B3'), 'B4':img.select('B4'), 'B5':img.select('B5'), 'B6':img.select('B6'), 'B7':img.select('B7')}
+            map_b = {
+                'B1': img.select('B1'), 'B2': img.select('B2'), 'B3': img.select('B3'),
+                'B4': img.select('B4'), 'B5': img.select('B5'),
+                'B6': img.select('B6'), 'B7': img.select('B7')
+            }
             return img.expression(formula, map_b).rename('Custom')
-        map_i = {'NDVI': ['B5','B4'], 'GNDVI': ['B5','B3'], 'NDWI (Water)': ['B3','B5'], 'NDMI': ['B5','B6']}
-        if index in map_i: return img.normalizedDifference(map_i[index]).rename(index.split()[0])
+        map_i = {'NDVI': ['B5', 'B4'], 'GNDVI': ['B5', 'B3'], 'NDWI (Water)': ['B3', 'B5'], 'NDMI': ['B5', 'B6']}
+        if index in map_i:
+            return img.normalizedDifference(map_i[index]).rename(index.split()[0])
 
     elif platform == "Sentinel-1 (Radar)":
         if index == '🛠️ Custom (Band Math)':
             map_b = {'VV': img.select('VV'), 'VH': img.select('VH')}
             return img.expression(formula, map_b).rename('Custom')
-        if index == 'VV': return img.select('VV')
-        if index == 'VH': return img.select('VH')
-        if index == 'VH/VV Ratio': return img.select('VH').subtract(img.select('VV')).rename('Ratio')
+        if index == 'VV':
+            return img.select('VV')
+        if index == 'VH':
+            return img.select('VH')
+        if index == 'VH/VV Ratio':
+            return img.select('VH').subtract(img.select('VV')).rename('Ratio')
     return img.select(0)
 
 # --- LULC SPECIFIC FUNCTIONS ---
@@ -232,11 +248,13 @@ def mask_s2_clouds(image):
     qa = image.select('QA60')
     cloud_bit_mask = 1 << 10
     cirrus_bit_mask = 1 << 11
-    mask = qa.bitwiseAnd(cloud_bit_mask).eq(0) \
-        .And(qa.bitwiseAnd(cirrus_bit_mask).eq(0))
+    mask = qa.bitwiseAnd(cloud_bit_mask).eq(0).And(
+        qa.bitwiseAnd(cirrus_bit_mask).eq(0)
+    )
     return image.updateMask(mask).divide(10000)
 
 def add_lulc_indices(image):
+    """Add NDVI, EVI, GNDVI, NDWI, NDMI, NDBI to Sentinel-2 image."""
     nir = image.select("B8")
     red = image.select("B4")
     green = image.select("B3")
@@ -251,10 +269,12 @@ def add_lulc_indices(image):
     ).rename("EVI")
     ndwi = green.subtract(nir).divide(green.add(nir)).rename("NDWI")
     ndmi = nir.subtract(swir1).divide(nir.add(swir1)).rename("NDMI")
-    
-    return image.addBands([ndvi, evi, gndvi, ndwi, ndmi])
+    ndbi = swir1.subtract(nir).divide(swir1.add(nir)).rename("NDBI")
 
-def generate_static_map_display(image, roi, vis_params, title, cmap_colors=None, is_categorical=False, class_names=None):
+    return image.addBands([ndvi, evi, gndvi, ndwi, ndmi, ndbi])
+
+def generate_static_map_display(image, roi, vis_params, title,
+                                cmap_colors=None, is_categorical=False, class_names=None):
     """
     Generates a static map (JPG) for download.
     Handles both Continuous (Spectral) and Categorical (LULC) data.
@@ -266,29 +286,30 @@ def generate_static_map_display(image, roi, vis_params, title, cmap_colors=None,
     })
     response = requests.get(thumb_url)
     img_pil = Image.open(BytesIO(response.content))
-    
-    # Basic plot setup
+
     fig, ax = plt.subplots(figsize=(8, 8), dpi=600, facecolor='#050509')
     ax.set_facecolor('#050509')
     ax.imshow(img_pil)
     ax.axis('off')
     ax.set_title(title, fontsize=14, fontweight='bold', pad=15, color='#00f2ff')
-    
-    # LEGEND GENERATION
+
+    # LEGEND
     if is_categorical and class_names and 'palette' in vis_params:
-        # Discrete Legend for LULC
-        patches = []
-        for name, color in zip(class_names, vis_params['palette']):
-            patches.append(mpatches.Patch(color=color, label=name))
-        
-        legend = ax.legend(handles=patches, loc='center left', bbox_to_anchor=(1.05, 0.5), 
-                           frameon=False, title="LULC Classes")
+        patches = [
+            mpatches.Patch(color=color, label=name)
+            for name, color in zip(class_names, vis_params['palette'])
+        ]
+        legend = ax.legend(
+            handles=patches,
+            loc='center left',
+            bbox_to_anchor=(1.05, 0.5),
+            frameon=False,
+            title="LULC Classes"
+        )
         plt.setp(legend.get_title(), color='white', fontweight='bold')
         for text in legend.get_texts():
             text.set_color("white")
-            
     elif cmap_colors:
-        # Continuous Colorbar for Spectral Indices
         cmap = mcolors.LinearSegmentedColormap.from_list("custom", cmap_colors)
         norm = mcolors.Normalize(vmin=vis_params['min'], vmax=vis_params['max'])
         sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
@@ -297,7 +318,7 @@ def generate_static_map_display(image, roi, vis_params, title, cmap_colors=None,
         cbar = plt.colorbar(sm, cax=cax)
         cbar.ax.yaxis.set_tick_params(color='white')
         plt.setp(plt.getp(cbar.ax.axes, 'yticklabels'), color='white')
-    
+
     buf = BytesIO()
     plt.savefig(buf, format='jpg', bbox_inches='tight', facecolor='#050509')
     buf.seek(0)
@@ -319,9 +340,14 @@ with st.sidebar:
 
     st.markdown("---")
     
+    # --- 5.1 ROI SELECTION ---
     with st.container():
         st.markdown("### 1. Target Acquisition (ROI)")
-        roi_method = st.radio("Selection Mode", ["Upload KML", "Point & Buffer", "Manual Coordinates"], label_visibility="collapsed")
+        roi_method = st.radio(
+            "Selection Mode",
+            ["Upload KML", "Point & Buffer", "Manual Coordinates"],
+            label_visibility="collapsed"
+        )
         
         new_roi = None
         if roi_method == "Upload KML":
@@ -334,14 +360,16 @@ with st.sidebar:
             lat = c1.number_input("Lat", 20.59)
             lon = c2.number_input("Lon", 78.96)
             rad = st.number_input("Radius (km)", 5)
-            if lat and lon: new_roi = ee.Geometry.Point([lon, lat]).buffer(rad*1000).bounds()
+            if lat and lon:
+                new_roi = ee.Geometry.Point([lon, lat]).buffer(rad * 1000).bounds()
         elif roi_method == "Manual Coordinates":
             c1, c2 = st.columns(2)
             min_lon = c1.number_input("Min Lon", 78.0)
             min_lat = c2.number_input("Min Lat", 20.0)
             max_lon = c1.number_input("Max Lon", 79.0)
             max_lat = c2.number_input("Max Lat", 21.0)
-            if min_lon < max_lon: new_roi = ee.Geometry.Rectangle([min_lon, min_lat, max_lon, max_lat])
+            if min_lon < max_lon:
+                new_roi = ee.Geometry.Rectangle([min_lon, min_lat, max_lon, max_lat])
 
         if new_roi:
             if st.session_state['roi'] is None or new_roi.getInfo() != st.session_state['roi'].getInfo():
@@ -351,16 +379,17 @@ with st.sidebar:
 
     st.markdown("---")
     
-    # --- MODE SPECIFIC SETTINGS ---
+    # --- 5.2 MODE SPECIFIC SETTINGS ---
     # Init vars
     rf_trees, svm_kernel, svm_gamma, gtb_trees = 100, 'RBF', 0.5, 100
     model_choice = "Random Forest"
 
     if mode == "Spectral Monitor":
         st.markdown("### 2. Sensor Config")
-        platform = st.selectbox("Satellite Network", [
-            "Sentinel-2 (Optical)", "Landsat 9 (Optical)", "Landsat 8 (Optical)", "Sentinel-1 (Radar)"
-        ])
+        platform = st.selectbox(
+            "Satellite Network",
+            ["Sentinel-2 (Optical)", "Landsat 9 (Optical)", "Landsat 8 (Optical)", "Sentinel-1 (Radar)"]
+        )
         
         is_optical = "Optical" in platform
         formula, vmin, vmax, orbit = "", 0, 1, "BOTH"
@@ -400,7 +429,11 @@ with st.sidebar:
             orbit = st.radio("Pass Direction", ["DESCENDING", "ASCENDING", "BOTH"])
             cloud = 0
 
-        pal_name = st.selectbox("Color Ramp", ["Red-Yellow-Green", "Blue-White-Green", "Magma", "Viridis", "Greyscale"], index=["Red-Yellow-Green", "Blue-White-Green", "Magma", "Viridis", "Greyscale"].index(pal_name))
+        pal_name = st.selectbox(
+            "Color Ramp",
+            ["Red-Yellow-Green", "Blue-White-Green", "Magma", "Viridis", "Greyscale"],
+            index=["Red-Yellow-Green", "Blue-White-Green", "Magma", "Viridis", "Greyscale"].index(pal_name)
+        )
         
         pal_map = {
             "Red-Yellow-Green": ['#d7191c', '#fdae61', '#ffffbf', '#a6d96a', '#1a9641'],
@@ -411,7 +444,7 @@ with st.sidebar:
         }
         cur_palette = pal_map.get(pal_name, pal_map["Red-Yellow-Green"])
 
-    else: # LULC MODE (MODIFIED FOR MULTIPLE MODELS)
+    else:  # LULC MODE (MULTI-MODEL)
         st.markdown("### 2. ML Architecture")
         
         # 1. Model Selector
@@ -423,41 +456,54 @@ with st.sidebar:
         # 2. Dynamic Hyperparameters
         if model_choice == "Random Forest":
             rf_trees = st.slider("Number of Trees", 10, 500, 150)
-        
         elif model_choice == "Support Vector Machine (SVM)":
             svm_kernel = st.selectbox("Kernel Type", ["RBF", "LINEAR", "POLY"])
             svm_gamma = st.number_input("Gamma (RBF)", value=0.5)
             st.caption("⚠️ SVM is computationally expensive on large areas.")
-
         elif model_choice == "Gradient Tree Boost":
             gtb_trees = st.slider("Trees (Iterations)", 10, 200, 100)
             st.caption("High accuracy, slower training.")
-
         elif model_choice == "CART (Decision Tree)":
             st.caption("Simple decision tree. Fast but prone to overfitting.")
-            
         elif model_choice == "Naive Bayes":
             st.caption("Probabilistic classifier. Fast, good baseline.")
 
         cloud = st.slider("Cloud Masking %", 0, 30, 20)
-        
         split_ratio = st.slider("Train/Validation Split", 0.5, 0.9, 0.8)
 
+        st.markdown("---")
+        st.markdown("### 3. Training Data")
+        train_data_mode = st.radio(
+            "Training Data Source",
+            ["Upload CSV (15k)", "Use Default URL"],
+            index=0
+        )
+        train_csv_file = None
+        if train_data_mode == "Upload CSV (15k)":
+            train_csv_file = st.file_uploader(
+                "Upload LULC Training CSV (with NDVI, EVI, GNDVI, NDWI, NDMI, NDBI)",
+                type=["csv"],
+                key="train_csv_uploader"
+            )
+
+        # Persist in session
+        st.session_state['train_data_mode'] = train_data_mode
+        st.session_state['train_csv_file'] = train_csv_file
+
     st.markdown("---")
-    st.markdown("### 3. Temporal Window")
+    st.markdown("### 4. Temporal Window")
     c1, c2 = st.columns(2)
-    start = c1.date_input("Start", datetime.now()-timedelta(60))
+    start = c1.date_input("Start", datetime.now() - timedelta(60))
     end = c2.date_input("End", datetime.now())
 
     st.markdown("###")
     if st.button("INITIALIZE SCAN 🚀"):
         if st.session_state['roi']:
             params = {
-                'calculated': True, 
-                'start': start.strftime("%Y-%m-%d"), 
+                'calculated': True,
+                'start': start.strftime("%Y-%m-%d"),
                 'end': end.strftime("%Y-%m-%d"),
                 'cloud': cloud,
-                # Pass all ML params regardless of selection (logic handled in main)
                 'model_choice': model_choice,
                 'rf_trees': rf_trees,
                 'svm_kernel': svm_kernel,
@@ -465,15 +511,24 @@ with st.sidebar:
                 'gtb_trees': gtb_trees,
                 'split_ratio': split_ratio if 'split_ratio' in locals() else 0.8
             }
-            
             if mode == "Spectral Monitor":
                 params.update({
-                    'platform': platform, 'idx': idx, 'formula': formula, 
-                    'orbit': orbit, 'vmin': vmin, 'vmax': vmax, 'palette': cur_palette
+                    'platform': platform,
+                    'idx': idx,
+                    'formula': formula,
+                    'orbit': orbit,
+                    'vmin': vmin,
+                    'vmax': vmax,
+                    'palette': cur_palette
                 })
-                
+            # training data config
+            if mode == "LULC Classifier":
+                params.update({
+                    'train_data_mode': st.session_state.get('train_data_mode', "Upload CSV (15k)"),
+                    'train_csv_file': st.session_state.get('train_csv_file', None)
+                })
             st.session_state.update(params)
-            st.session_state['dates'] = [] 
+            st.session_state['dates'] = []
         else:
             st.error("❌ Error: ROI not defined.")
 
@@ -502,49 +557,74 @@ if not st.session_state['calculated']:
     m = geemap.Map(height=500, basemap="HYBRID")
     if st.session_state['roi']:
         m.centerObject(st.session_state['roi'], 12)
-        m.addLayer(ee.Image().paint(st.session_state['roi'], 2, 3), {'palette': '#00f2ff'}, 'Target ROI')
+        m.addLayer(
+            ee.Image().paint(st.session_state['roi'], 2, 3),
+            {'palette': '#00f2ff'},
+            'Target ROI'
+        )
     m.to_streamlit()
 
 else:
     roi = st.session_state['roi']
     p = st.session_state
     
-    
-
     # ==========================================
     # MODE 1: SPECTRAL MONITOR
     # ==========================================
     if p['mode'] == "Spectral Monitor":
         with st.spinner("🛰️ Establishing Uplink... Processing Earth Engine Data..."):
             if p['platform'] == "Sentinel-2 (Optical)":
-                col = (ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
-                       .filterBounds(roi).filterDate(p['start'], p['end'])
-                       .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', p['cloud'])))
-                processed = col.map(lambda img: img.addBands(compute_index(img, p['platform'], p['idx'], p['formula'])))
+                col = (
+                    ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
+                    .filterBounds(roi)
+                    .filterDate(p['start'], p['end'])
+                    .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', p['cloud']))
+                )
+                processed = col.map(
+                    lambda img: img.addBands(
+                        compute_index(img, p['platform'], p['idx'], p['formula'])
+                    )
+                )
             elif "Landsat" in p['platform']:
                 col_raw = ee.ImageCollection("LANDSAT/LC09/C02/T1_L2") if "Landsat 9" in p['platform'] else ee.ImageCollection("LANDSAT/LC08/C02/T1_L2")
-                col = (col_raw.filterBounds(roi).filterDate(p['start'], p['end'])
-                       .filter(ee.Filter.lt('CLOUD_COVER', p['cloud'])))
+                col = (
+                    col_raw.filterBounds(roi)
+                    .filterDate(p['start'], p['end'])
+                    .filter(ee.Filter.lt('CLOUD_COVER', p['cloud']))
+                )
+
                 def process_landsat_step(img):
                     scaled = preprocess_landsat(img)
                     renamed = rename_landsat_bands(scaled)
-                    return renamed.addBands(compute_index(renamed, p['platform'], p['idx'], p['formula']))
+                    return renamed.addBands(
+                        compute_index(renamed, p['platform'], p['idx'], p['formula'])
+                    )
+
                 processed = col.map(process_landsat_step)
             else:
-                col = (ee.ImageCollection('COPERNICUS/S1_GRD')
-                       .filterBounds(roi).filterDate(p['start'], p['end'])
-                       .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VV')))
-                if p['orbit'] != "BOTH": col = col.filter(ee.Filter.eq('orbitProperties_pass', p['orbit']))
-                processed = col.map(lambda img: img.addBands(compute_index(img, p['platform'], p['idx'], p['formula'])))
+                col = (
+                    ee.ImageCollection('COPERNICUS/S1_GRD')
+                    .filterBounds(roi)
+                    .filterDate(p['start'], p['end'])
+                    .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VV'))
+                )
+                if p['orbit'] != "BOTH":
+                    col = col.filter(ee.Filter.eq('orbitProperties_pass', p['orbit']))
+                processed = col.map(
+                    lambda img: img.addBands(
+                        compute_index(img, p['platform'], p['idx'], p['formula'])
+                    )
+                )
             
             if not st.session_state['dates']:
                 cnt = processed.size().getInfo()
                 if cnt > 0:
                     dates_list = processed.aggregate_array('system:time_start').map(
-                        lambda t: ee.Date(t).format('YYYY-MM-dd')).distinct().sort()
+                        lambda t: ee.Date(t).format('YYYY-MM-dd')
+                    ).distinct().sort()
                     st.session_state['dates'] = dates_list.slice(0, 50).getInfo()
                 else:
-                    st.error(f"⚠️ Signal Lost: No images found.")
+                    st.error("⚠️ Signal Lost: No images found.")
                     st.stop()
 
         if st.session_state['dates']:
@@ -554,14 +634,15 @@ else:
             with col_data:
                 st.markdown('<div class="glass-card">', unsafe_allow_html=True)
                 st.markdown('<div class="card-label">📅 ACQUISITION DATE</div>', unsafe_allow_html=True)
-                sel_date = st.selectbox("Select Timestamp", dates, index=len(dates)-1, label_visibility="collapsed")
+                sel_date = st.selectbox("Select Timestamp", dates, index=len(dates) - 1, label_visibility="collapsed")
                 st.caption(f"{len(dates)} Scenes Available")
                 st.markdown('</div>', unsafe_allow_html=True)
 
                 d_s = sel_date
                 d_e = (datetime.strptime(sel_date, "%Y-%m-%d") + timedelta(1)).strftime("%Y-%m-%d")
                 band = 'Custom' if 'Custom' in p['idx'] else p['idx'].split()[0]
-                if 'Ratio' in p['idx']: band = 'Ratio'
+                if 'Ratio' in p['idx']:
+                    band = 'Ratio'
                 
                 final_img = processed.filterDate(d_s, d_e).select(band).median().clip(roi)
                 vis = {'min': p['vmin'], 'max': p['vmax'], 'palette': p['palette']}
@@ -569,15 +650,35 @@ else:
                 st.markdown('<div class="glass-card">', unsafe_allow_html=True)
                 st.markdown('<div class="card-label">💾 DATA EXPORT</div>', unsafe_allow_html=True)
                 try:
-                    url = final_img.getDownloadURL({'scale': 30 if "Landsat" in p['platform'] else 10, 'region': roi, 'name': f"{band}_{sel_date}"})
-                    st.markdown(f"<a href='{url}' style='color:#00f2ff; text-decoration:none;'>🔗 Download GeoTIFF</a>", unsafe_allow_html=True)
-                except: st.caption("Region too large for instant link.")
+                    url = final_img.getDownloadURL({
+                        'scale': 30 if "Landsat" in p['platform'] else 10,
+                        'region': roi,
+                        'name': f"{band}_{sel_date}"
+                    })
+                    st.markdown(
+                        f"<a href='{url}' style='color:#00f2ff; text-decoration:none;'>🔗 Download GeoTIFF</a>",
+                        unsafe_allow_html=True
+                    )
+                except Exception:
+                    st.caption("Region too large for instant link.")
                 
                 st.markdown("---")
                 if st.button("📷 Render Map (JPG)", use_container_width=True):
                     with st.spinner("Rendering..."):
-                        buf = generate_static_map_display(final_img, roi, vis, f"{p['idx']} | {sel_date}", cmap_colors=p['palette'])
-                        st.download_button("⬇️ Save Image", buf, f"Ni30_Map_{sel_date}.jpg", "image/jpeg", use_container_width=True)
+                        buf = generate_static_map_display(
+                            final_img,
+                            roi,
+                            vis,
+                            f"{p['idx']} | {sel_date}",
+                            cmap_colors=p['palette']
+                        )
+                        st.download_button(
+                            "⬇️ Save Image",
+                            buf,
+                            f"Ni30_Map_{sel_date}.jpg",
+                            "image/jpeg",
+                            use_container_width=True
+                        )
                 st.markdown('</div>', unsafe_allow_html=True)
 
             with col_map:
@@ -591,37 +692,83 @@ else:
     # MODE 2: MULTI-MODEL LULC CLASSIFIER
     # ==========================================
     elif p['mode'] == "LULC Classifier":
-        
-        # HARDCODED DATASET URL
-        DEFAULT_TRAIN_URL = "https://raw.githubusercontent.com/nitesh4004/Geospatial-Ni30/main/lulc_spectral_indices_10000.csv"
-        
+        train_data_mode = p.get('train_data_mode', "Upload CSV (15k)")
+        train_csv_file = p.get('train_csv_file', None)
+
         with st.spinner(f"🧠 Initializing {p['model_choice']} & Training..."):
             # 1. LOAD TRAINING DATA
             try:
-                df = pd.read_csv(DEFAULT_TRAIN_URL)
-                
+                if train_data_mode == "Upload CSV (15k)" and train_csv_file is not None:
+                    df = pd.read_csv(train_csv_file)
+                else:
+                    # Fallback: default URL (old 10k CSV) if no upload
+                    DEFAULT_TRAIN_URL = (
+                        "https://raw.githubusercontent.com/nitesh4004/Geospatial-Ni30/main/"
+                        "lulc_spectral_indices_10000.csv"
+                    )
+                    df = pd.read_csv(DEFAULT_TRAIN_URL)
+
+                # Define class names consistent with 12-class 15k CSV
                 class_names = [
-                    "Dense Forest", "Open Forest", "Shrubland", "Grassland",
-                    "Cropland", "Urban/Built-up", "Bare Soil", "Water Bodies",
-                    "Wetland", "Snow/Ice",
+                    "Water",          # 0
+                    "Dense Forest",   # 1
+                    "Sparse Forest",  # 2
+                    "Agricultural",   # 3
+                    "Grassland",      # 4
+                    "Built-up",       # 5
+                    "Barren",         # 6
+                    "Wetland",        # 7
+                    "Cropland",       # 8
+                    "Settlement",     # 9
+                    "Rock/Exposed",   # 10
+                    "Urban",          # 11
                 ]
-                class_lut = dict(zip(class_names, range(len(class_names))))
-                
+                class_lut = {name: idx for idx, name in enumerate(class_names)}
+
+                # Ensure numeric 'class' column
                 if "class" not in df.columns:
-                        df["class"] = df["LULC_Type"].map(class_lut)
+                    if "LULC_ID" in df.columns:
+                        df["class"] = df["LULC_ID"]
+                    elif "LULC_Class" in df.columns:
+                        df["class"] = df["LULC_Class"].map(class_lut)
+
                 df = df.dropna(subset=["class"])
-                
+                df["class"] = df["class"].astype(int)
+
+                # LIMIT TO REQUIRED COLUMNS
+                feature_cols = ["NDVI", "EVI", "GNDVI", "NDWI", "NDMI", "NDBI", "class"]
+                missing = [c for c in feature_cols if c not in df.columns]
+                if missing:
+                    st.error(f"Training CSV missing columns: {missing}")
+                    st.stop()
+
+                df_feat = df[feature_cols]
+
                 # Create Feature Collection
-                features = [ee.Feature(None, row.to_dict()) for i, row in df.iterrows()]
+                features = [
+                    ee.Feature(
+                        None,
+                        {
+                            "NDVI": float(row["NDVI"]),
+                            "EVI": float(row["EVI"]),
+                            "GNDVI": float(row["GNDVI"]),
+                            "NDWI": float(row["NDWI"]),
+                            "NDMI": float(row["NDMI"]),
+                            "NDBI": float(row["NDBI"]),
+                            "class": int(row["class"])
+                        }
+                    )
+                    for _, row in df_feat.iterrows()
+                ]
                 fc_raw = ee.FeatureCollection(features)
-                
+
                 # 1.1 SPLIT DATA FOR VALIDATION
                 fc_with_random = fc_raw.randomColumn()
                 training_fc = fc_with_random.filter(ee.Filter.lt('random', p['split_ratio']))
                 validation_fc = fc_with_random.filter(ee.Filter.gte('random', p['split_ratio']))
-                
+
             except Exception as e:
-                st.error(f"❌ Data Link Error: {e}. Please contact admin.")
+                st.error(f"❌ Data Load Error: {e}. Check CSV format/URL.")
                 st.stop()
 
             # 2. PREPARE SATELLITE DATA
@@ -634,40 +781,43 @@ else:
             )
             
             if s2_collection.size().getInfo() == 0:
-                st.error("No clear images found in this date range.")
+                st.error("No clear Sentinel-2 images found in this date range.")
                 st.stop()
                 
             s2_median = s2_collection.median().clip(roi)
             indices_img = add_lulc_indices(s2_median)
 
-            # 3. INSTANTIATE SELECTED MODEL (THE UPGRADE)
-            input_bands = ["NDVI", "EVI", "GNDVI", "NDWI", "NDMI"]
+            # 3. INSTANTIATE SELECTED MODEL
+            input_bands = ["NDVI", "EVI", "GNDVI", "NDWI", "NDMI", "NDBI"]
             
-            # Logic for Model Selection
             if p['model_choice'] == "Random Forest":
                 classifier_inst = ee.Classifier.smileRandomForest(
-                    numberOfTrees=p['rf_trees'], 
+                    numberOfTrees=p['rf_trees'],
                     seed=42
                 )
             elif p['model_choice'] == "Support Vector Machine (SVM)":
                 classifier_inst = ee.Classifier.libsvm(
-                    kernelType=p['svm_kernel'], 
-                    gamma=p['svm_gamma'], 
+                    kernelType=p['svm_kernel'],
+                    gamma=p['svm_gamma'],
                     cost=10
                 )
             elif p['model_choice'] == "Gradient Tree Boost":
                 classifier_inst = ee.Classifier.smileGradientTreeBoost(
-                    numberOfTrees=p['gtb_trees'], 
-                    shrinkage=0.005, 
-                    samplingRate=0.7, 
+                    numberOfTrees=p['gtb_trees'],
+                    shrinkage=0.005,
+                    samplingRate=0.7,
                     seed=42
                 )
             elif p['model_choice'] == "CART (Decision Tree)":
                 classifier_inst = ee.Classifier.smileCart()
             elif p['model_choice'] == "Naive Bayes":
                 classifier_inst = ee.Classifier.smileNaiveBayes()
+            else:
+                classifier_inst = ee.Classifier.smileRandomForest(
+                    numberOfTrees=150,
+                    seed=42
+                )
 
-            # Train & Classify
             trained_classifier = classifier_inst.train(
                 features=training_fc,
                 classProperty="class",
@@ -684,8 +834,21 @@ else:
             kappa = error_matrix.kappa().getInfo()
             
             # 5. VISUALIZATION
-            lulc_palette = ["#1A5E1A", "#387C2B", "#BDB76B", "#98FB98", "#FFD700", "#DC143C", "#D2691E", "#0000FF", "#008080", "#FFFFFF"]
-            vis_params = {"min": 0, "max": 9, "palette": lulc_palette}
+            lulc_palette = [
+                "#0000FF",  # Water
+                "#006400",  # Dense Forest
+                "#228B22",  # Sparse Forest
+                "#7CFC00",  # Agricultural
+                "#ADFF2F",  # Grassland
+                "#FF0000",  # Built-up
+                "#D2B48C",  # Barren
+                "#00FFFF",  # Wetland
+                "#FFD700",  # Cropland
+                "#FF69B4",  # Settlement
+                "#A0522D",  # Rock/Exposed
+                "#800000",  # Urban
+            ]
+            vis_params = {"min": 0, "max": 11, "palette": lulc_palette}
             
             col_map, col_res = st.columns([3, 1])
             
@@ -695,33 +858,58 @@ else:
                 st.success(f"Architecture: {p['model_choice']}")
                 
                 c_a, c_b = st.columns(2)
-                c_a.markdown(f"""<div class="metric-value">{overall_accuracy:.2%}</div><div class="metric-sub">Overall Accuracy</div>""", unsafe_allow_html=True)
-                c_b.markdown(f"""<div class="metric-value">{kappa:.3f}</div><div class="metric-sub">Kappa Coeff</div>""", unsafe_allow_html=True)
+                c_a.markdown(
+                    f"""<div class="metric-value">{overall_accuracy:.2%}</div>
+                        <div class="metric-sub">Overall Accuracy</div>""",
+                    unsafe_allow_html=True
+                )
+                c_b.markdown(
+                    f"""<div class="metric-value">{kappa:.3f}</div>
+                        <div class="metric-sub">Kappa Coeff</div>""",
+                    unsafe_allow_html=True
+                )
                 
                 st.markdown("---")
-                st.markdown(f"<div style='font-size:0.8rem'>Training Samples: {training_fc.size().getInfo()}</div>", unsafe_allow_html=True)
-                st.markdown(f"<div style='font-size:0.8rem'>Validation Samples: {validation_fc.size().getInfo()}</div>", unsafe_allow_html=True)
+                st.markdown(
+                    f"<div style='font-size:0.8rem'>Training Samples: {training_fc.size().getInfo()}</div>",
+                    unsafe_allow_html=True
+                )
+                st.markdown(
+                    f"<div style='font-size:0.8rem'>Validation Samples: {validation_fc.size().getInfo()}</div>",
+                    unsafe_allow_html=True
+                )
 
                 st.markdown("---")
                 st.markdown('<div class="card-label">💾 EXPORT RESULT</div>', unsafe_allow_html=True)
                 
                 if st.button("☁️ Save to Drive"):
-                        ee.batch.Export.image.toDrive(
-                        image=lulc_class, description=f"LULC_{p['model_choice']}_{datetime.now().strftime('%Y%m%d')}", 
-                        scale=10, region=roi, folder='GEE_Exports'
+                    ee.batch.Export.image.toDrive(
+                        image=lulc_class,
+                        description=f"LULC_{p['model_choice']}_{datetime.now().strftime('%Y%m%d')}",
+                        scale=10,
+                        region=roi,
+                        folder='GEE_Exports'
                     ).start()
-                        st.toast("Export Started to GDrive")
+                    st.toast("Export Started to GDrive")
                 
                 st.markdown("---")
                 if st.button("📷 Render Map (JPG)", key="lulc_jpg"):
                     with st.spinner("Generating Map..."):
                         buf = generate_static_map_display(
-                            lulc_class, roi, vis_params, 
-                            f"LULC | {p['model_choice']}", 
-                            is_categorical=True, 
+                            lulc_class,
+                            roi,
+                            vis_params,
+                            f"LULC | {p['model_choice']}",
+                            is_categorical=True,
                             class_names=class_names
                         )
-                        st.download_button("⬇️ Save Image", buf, f"Ni30_LULC_{datetime.now().date()}.jpg", "image/jpeg", use_container_width=True)
+                        st.download_button(
+                            "⬇️ Save Image",
+                            buf,
+                            f"Ni30_LULC_{datetime.now().date()}.jpg",
+                            "image/jpeg",
+                            use_container_width=True
+                        )
                 
                 st.markdown('</div>', unsafe_allow_html=True)
 
@@ -736,8 +924,6 @@ else:
                 # Add LULC
                 m.addLayer(lulc_class, vis_params, f"LULC: {p['model_choice']}")
                 
-                # Legend
                 legend_dict = dict(zip(class_names, lulc_palette))
                 m.add_legend(title="LULC Classes", legend_dict=legend_dict)
                 m.to_streamlit()
-
