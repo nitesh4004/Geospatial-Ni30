@@ -12,6 +12,12 @@ from io import BytesIO
 from PIL import Image
 from datetime import datetime, timedelta
 import pandas as pd
+import numpy as np
+
+# --- ML/DL IMPORTS ---
+from sklearn.neural_network import MLPClassifier
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import accuracy_score, cohen_kappa_score
 
 # --- 1. PAGE CONFIG ---
 st.set_page_config(
@@ -150,14 +156,12 @@ st.markdown("""
 
 # --- 3. AUTHENTICATION ---
 try:
-    # Attempt to use Streamlit Secrets first
     service_account = st.secrets["gcp_service_account"]["client_email"]
     secret_dict = dict(st.secrets["gcp_service_account"])
     key_data = json.dumps(secret_dict) 
     credentials = ee.ServiceAccountCredentials(service_account, key_data=key_data)
     ee.Initialize(credentials)
 except Exception:
-    # Fallback to local GEE auth
     try:
         ee.Initialize()
     except Exception as e:
@@ -234,7 +238,6 @@ def mask_s2_clouds(image):
     cirrus_bit_mask = 1 << 11
     mask = qa.bitwiseAnd(cloud_bit_mask).eq(0) \
         .And(qa.bitwiseAnd(cirrus_bit_mask).eq(0))
-    # Scale to 0-1 for indices calculation compatibility with our training data logic
     return image.updateMask(mask).divide(10000)
 
 def add_lulc_indices(image):
@@ -256,10 +259,6 @@ def add_lulc_indices(image):
     return image.addBands([ndvi, evi, gndvi, ndwi, ndmi])
 
 def generate_static_map_display(image, roi, vis_params, title, cmap_colors=None, is_categorical=False, class_names=None):
-    """
-    Generates a static map (JPG) for download.
-    Handles both Continuous (Spectral) and Categorical (LULC) data.
-    """
     thumb_url = image.getThumbURL({
         'min': vis_params['min'], 'max': vis_params['max'],
         'palette': vis_params['palette'], 'region': roi,
@@ -268,28 +267,24 @@ def generate_static_map_display(image, roi, vis_params, title, cmap_colors=None,
     response = requests.get(thumb_url)
     img_pil = Image.open(BytesIO(response.content))
     
-    # Basic plot setup
     fig, ax = plt.subplots(figsize=(8, 8), dpi=600, facecolor='#050509')
     ax.set_facecolor('#050509')
     ax.imshow(img_pil)
     ax.axis('off')
     ax.set_title(title, fontsize=14, fontweight='bold', pad=15, color='#00f2ff')
     
-    # LEGEND GENERATION
     if is_categorical and class_names and 'palette' in vis_params:
-        # Discrete Legend for LULC
         patches = []
         for name, color in zip(class_names, vis_params['palette']):
             patches.append(mpatches.Patch(color=color, label=name))
         
         legend = ax.legend(handles=patches, loc='center left', bbox_to_anchor=(1.05, 0.5), 
-                           frameon=False, title="LULC Classes")
+                           frameon=False, title="Classes")
         plt.setp(legend.get_title(), color='white', fontweight='bold')
         for text in legend.get_texts():
             text.set_color("white")
             
     elif cmap_colors:
-        # Continuous Colorbar for Spectral Indices
         cmap = mcolors.LinearSegmentedColormap.from_list("custom", cmap_colors)
         norm = mcolors.Normalize(vmin=vis_params['min'], vmax=vis_params['max'])
         sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
@@ -355,6 +350,7 @@ with st.sidebar:
     # --- MODE SPECIFIC SETTINGS ---
     # Init vars
     rf_trees, svm_kernel, svm_gamma, gtb_trees = 100, 'RBF', 0.5, 100
+    ann_layers, ann_iter, ann_alpha = (100, 100), 500, 0.0001
     model_choice = "Random Forest"
 
     if mode == "Spectral Monitor":
@@ -415,40 +411,48 @@ with st.sidebar:
     else: # LULC MODE
         st.markdown("### 2. ML Architecture")
         
-        # 1. Model Selector (Added Deep Learning)
+        # 1. Model Selector
         model_choice = st.selectbox(
             "Select Classifier", 
-            ["Dynamic World (Deep Learning)", "Random Forest", "Support Vector Machine (SVM)", "Gradient Tree Boost", "CART (Decision Tree)", "Naive Bayes"]
+            [
+                "Google Dynamic World (Pre-trained Deep Learning)",
+                "Artificial Neural Network (MLP)", 
+                "Random Forest", 
+                "Support Vector Machine (SVM)", 
+                "Gradient Tree Boost", 
+                "CART (Decision Tree)", 
+                "Naive Bayes"
+            ]
         )
 
-        cloud = st.slider("Cloud Masking %", 0, 30, 20)
-        split_ratio = 0.8 # Default
-
         # 2. Dynamic Hyperparameters
-        if model_choice == "Dynamic World (Deep Learning)":
-            st.info("🧠 Using Google's FCN (Fully Convolutional Neural Network) Pre-trained on 24k Sentinel-2 Tiles.")
-            
+        if model_choice == "Google Dynamic World (Pre-trained Deep Learning)":
+            st.info("🌍 Uses Google's pre-trained deep learning model (FCN) on Sentinel-2 data. 10m global resolution.")
+            cloud = st.slider("Cloud Masking % (For S2 composite)", 0, 30, 20)
+
+        elif model_choice == "Artificial Neural Network (MLP)":
+            st.info("🧠 Hybrid Execution: Training runs locally on Streamlit using Scikit-Learn. Map visualization uses a Random Forest proxy.")
+            hidden_layers = st.text_input("Hidden Layers (e.g. 100,50)", "100,100")
+            ann_layers = tuple(map(int, hidden_layers.split(',')))
+            ann_iter = st.slider("Max Iterations", 200, 1000, 500)
+            ann_alpha = st.number_input("Alpha (L2)", value=0.0001, format="%.4f")
+            cloud = st.slider("Cloud Masking %", 0, 30, 20)
+            split_ratio = st.slider("Train/Validation Split", 0.5, 0.9, 0.8)
+
         elif model_choice == "Random Forest":
             rf_trees = st.slider("Number of Trees", 10, 500, 150)
+            cloud = st.slider("Cloud Masking %", 0, 30, 20)
             split_ratio = st.slider("Train/Validation Split", 0.5, 0.9, 0.8)
         
         elif model_choice == "Support Vector Machine (SVM)":
             svm_kernel = st.selectbox("Kernel Type", ["RBF", "LINEAR", "POLY"])
             svm_gamma = st.number_input("Gamma (RBF)", value=0.5)
-            st.caption("⚠️ SVM is computationally expensive on large areas.")
+            cloud = st.slider("Cloud Masking %", 0, 30, 20)
             split_ratio = st.slider("Train/Validation Split", 0.5, 0.9, 0.8)
 
-        elif model_choice == "Gradient Tree Boost":
-            gtb_trees = st.slider("Trees (Iterations)", 10, 200, 100)
-            st.caption("High accuracy, slower training.")
-            split_ratio = st.slider("Train/Validation Split", 0.5, 0.9, 0.8)
-
-        elif model_choice == "CART (Decision Tree)":
-            st.caption("Simple decision tree. Fast but prone to overfitting.")
-            split_ratio = st.slider("Train/Validation Split", 0.5, 0.9, 0.8)
-            
-        elif model_choice == "Naive Bayes":
-            st.caption("Probabilistic classifier. Fast, good baseline.")
+        else: # Other models
+            st.caption("Standard GEE classifiers.")
+            cloud = st.slider("Cloud Masking %", 0, 30, 20)
             split_ratio = st.slider("Train/Validation Split", 0.5, 0.9, 0.8)
 
     st.markdown("---")
@@ -472,6 +476,9 @@ with st.sidebar:
                 'gtb_trees': gtb_trees,
                 'split_ratio': split_ratio if 'split_ratio' in locals() else 0.8
             }
+
+            if model_choice == "Artificial Neural Network (MLP)":
+                params.update({'ann_layers': ann_layers, 'ann_iter': ann_iter, 'ann_alpha': ann_alpha})
             
             if mode == "Spectral Monitor":
                 params.update({
@@ -597,245 +604,228 @@ else:
     # ==========================================
     elif p['mode'] == "LULC Classifier":
         
-        # --- PATH A: DEEP LEARNING (DYNAMIC WORLD) ---
-        if p['model_choice'] == "Dynamic World (Deep Learning)":
-             with st.spinner("🧠 Initializing Neural Network (Dynamic World V1)..."):
-                # Fetch Dynamic World Collection
-                dw_col = ee.ImageCollection("GOOGLE/DYNAMICWORLD/V1").filterBounds(roi).filterDate(p['start'], p['end'])
+        # 1. SETUP MAP
+        col_map, col_res = st.columns([3, 1])
+        m = geemap.Map(height=700, basemap="HYBRID")
+        m.centerObject(roi, 13)
+        
+        # S2 Background for all modes
+        s2_collection = (
+            ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
+            .filterBounds(roi)
+            .filterDate(p['start'], p['end'])
+            .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", p['cloud']))
+            .map(mask_s2_clouds) 
+        )
+        if s2_collection.size().getInfo() > 0:
+            s2_median = s2_collection.median().clip(roi)
+            rgb_vis = {'min': 0, 'max': 0.3, 'bands': ['B4', 'B3', 'B2']}
+            m.addLayer(s2_median, rgb_vis, 'RGB Composite')
+        else:
+            st.warning("No clear Sentinel-2 background available.")
+
+        # --- BRANCH A: PRE-TRAINED DEEP LEARNING (DYNAMIC WORLD) ---
+        if p['model_choice'] == "Google Dynamic World (Pre-trained Deep Learning)":
+            with st.spinner("🧠 Querying Google Dynamic World V1 (Deep Learning)..."):
+                
+                # Filter DW Collection
+                dw_col = ee.ImageCollection("GOOGLE/DYNAMICWORLD/V1") \
+                    .filterBounds(roi) \
+                    .filterDate(p['start'], p['end'])
                 
                 if dw_col.size().getInfo() == 0:
-                    st.error("❌ No Dynamic World data found for this period/location.")
+                    st.error("No Dynamic World data found for this date/region.")
                     st.stop()
+                    
+                # Create Composite (Mode of labels)
+                # The 'label' band contains the class index with highest probability
+                dw_image = dw_col.select('label').mode().clip(roi)
                 
-                # Create a Mode Composite (Most common class per pixel)
-                # The 'label' band contains the class integers
-                lulc_class = dw_col.select('label').mode().clip(roi)
-
-                # Dynamic World specific visualization
-                # Classes: Water(0), Trees(1), Grass(2), Flooded_Veg(3), Crops(4), Shrub(5), Bare(6), Snow(7), Built(8)
-                dw_palette = [
-                    '#419BDF', '#397D49', '#88B053', '#7A87C6', 
-                    '#E49635', '#DFC35A', '#C4281B', '#A59B8F', '#52698D'
-                ]
-                dw_names = [
-                    'Water', 'Trees', 'Grass', 'Flooded Veg', 
-                    'Crops', 'Shrub & Scrub', 'Bare', 'Snow & Ice', 'Built-up'
-                ]
-                vis_params = {"min": 0, "max": 8, "palette": dw_palette}
+                # DW Specific Visualization
+                dw_vis = {
+                    "min": 0, "max": 8,
+                    "palette": [
+                        '#419bdf', '#397d49', '#88b053', '#7a87c6', '#e49635',
+                        '#dfc35a', '#c4281b', '#a59b8f', '#b39fe1'
+                    ]
+                }
                 
-                # Prepare Sentinel-2 Underlay for visual context
-                s2_bg = (ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
-                         .filterBounds(roi)
-                         .filterDate(p['start'], p['end'])
-                         .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", 30))
-                         .median().clip(roi).divide(10000))
-
-                col_map, col_res = st.columns([3, 1])
+                dw_names = ['Water', 'Trees', 'Grass', 'Flooded Veg', 'Crops', 
+                            'Shrub/Scrub', 'Built', 'Bare', 'Snow/Ice']
                 
+                m.addLayer(dw_image, dw_vis, "Dynamic World LULC")
+                m.add_legend(title="Dynamic World Classes", legend_dict=dict(zip(dw_names, dw_vis['palette'])))
+                
+                # Metrics Display (N/A for Pre-trained)
                 with col_res:
                     st.markdown('<div class="glass-card">', unsafe_allow_html=True)
                     st.markdown('<div class="card-label">🧠 MODEL METRICS</div>', unsafe_allow_html=True)
-                    st.info(f"Architecture: Deep FCN")
-                    st.caption("Pre-trained on 24k+ Sentinel-2 tiles globally.")
-                    st.caption("Metrics not available for pre-trained inference.")
-                    
+                    st.info("Pre-trained Global Model")
+                    st.caption("Metrics not applicable for pre-trained inference.")
                     st.markdown("---")
                     st.markdown('<div class="card-label">💾 EXPORT RESULT</div>', unsafe_allow_html=True)
-                    
                     if st.button("☁️ Save to Drive"):
-                            ee.batch.Export.image.toDrive(
-                            image=lulc_class, description=f"LULC_DynamicWorld_{datetime.now().strftime('%Y%m%d')}", 
+                        ee.batch.Export.image.toDrive(
+                            image=dw_image, description=f"DW_LULC_{datetime.now().strftime('%Y%m%d')}", 
                             scale=10, region=roi, folder='GEE_Exports'
                         ).start()
-                            st.toast("Export Started to GDrive")
+                        st.toast("Export Started to GDrive")
                     
                     st.markdown("---")
-                    if st.button("📷 Render Map (JPG)", key="lulc_jpg_dw"):
+                    if st.button("📷 Render Map (JPG)"):
                         with st.spinner("Generating Map..."):
                             buf = generate_static_map_display(
-                                lulc_class, roi, vis_params, 
-                                f"LULC | Deep Learning (Dynamic World)", 
-                                is_categorical=True, 
-                                class_names=dw_names
+                                dw_image, roi, dw_vis, "Dynamic World (DL)", 
+                                is_categorical=True, class_names=dw_names
                             )
-                            st.download_button("⬇️ Save Image", buf, f"Ni30_DW_LULC_{datetime.now().date()}.jpg", "image/jpeg", use_container_width=True)
-                    
+                            st.download_button("⬇️ Save Image", buf, "Ni30_DW_LULC.jpg", "image/jpeg", use_container_width=True)
                     st.markdown('</div>', unsafe_allow_html=True)
 
-                with col_map:
-                    m = geemap.Map(height=700, basemap="HYBRID")
-                    m.centerObject(roi, 13)
-                    
-                    # Add RGB
-                    rgb_vis = {'min': 0, 'max': 0.3, 'bands': ['B4', 'B3', 'B2']}
-                    m.addLayer(s2_bg, rgb_vis, 'RGB Composite')
-                    
-                    # Add LULC
-                    m.addLayer(lulc_class, vis_params, "LULC: Dynamic World")
-                    
-                    # Legend
-                    legend_dict = dict(zip(dw_names, dw_palette))
-                    m.add_legend(title="LULC Classes", legend_dict=legend_dict)
-                    m.to_streamlit()
-
-
-        # --- PATH B: CLASSIC ML (RANDOM FOREST, SVM, ETC) ---
+        # --- BRANCH B: CUSTOM TRAINING (ANN, RF, SVM) ---
         else:
             TRAIN_URL = "https://raw.githubusercontent.com/nitesh4004/Geospatial-Ni30/main/sentinel2_lulc_synthetic.csv"
             
-            with st.spinner(f"🧠 Initializing {p['model_choice']} & Training..."):
-                # 2. LOAD & PREPROCESS TRAINING DATA
+            with st.spinner(f"🧠 Training {p['model_choice']}..."):
                 try:
                     df = pd.read_csv(TRAIN_URL)
                     
-                    # 2.1 Feature Engineering: Calculate Indices from Raw Bands
-                    # The synthetic data is scaled 0-10000, we need 0-1 for EVI calculation to match the image
+                    # Feature Engineering
                     df['B2'] = df['B2'] / 10000.0
                     df['B3'] = df['B3'] / 10000.0
                     df['B4'] = df['B4'] / 10000.0
                     df['B8'] = df['B8'] / 10000.0
                     df['B11'] = df['B11'] / 10000.0
                     
-                    # Calculate Spectral Indices (Must match GEE formulas exactly)
                     df['NDVI'] = (df['B8'] - df['B4']) / (df['B8'] + df['B4'])
                     df['GNDVI'] = (df['B8'] - df['B3']) / (df['B8'] + df['B3'])
                     df['EVI'] = 2.5 * ((df['B8'] - df['B4']) / (df['B8'] + 6 * df['B4'] - 7.5 * df['B2'] + 1))
                     df['NDWI'] = (df['B3'] - df['B8']) / (df['B3'] + df['B8'])
                     df['NDMI'] = (df['B8'] - df['B11']) / (df['B8'] + df['B11'])
                     
-                    # 2.2 Define Classes (Based on your CSV generation)
                     class_names = ['Water', 'Forest', 'Cropland', 'Built-up', 'Barren', 'Rock/Exposed']
                     class_lut = {name: i for i, name in enumerate(class_names)}
                     
                     if "Class" in df.columns:
                         df["class_val"] = df["Class"].map(class_lut)
-                    else:
-                        st.error("CSV must have a 'Class' column")
-                        st.stop()
                     
                     df = df.dropna(subset=["class_val"])
+                    input_bands = ["NDVI", "EVI", "GNDVI", "NDWI", "NDMI"]
                     
-                    # Create Feature Collection
-                    features = []
-                    for i, row in df.iterrows():
-                        feat = ee.Feature(None, {
-                            'NDVI': row['NDVI'], 'EVI': row['EVI'], 
-                            'GNDVI': row['GNDVI'], 'NDWI': row['NDWI'], 
-                            'NDMI': row['NDMI'], 'class': int(row['class_val'])
-                        })
-                        features.append(feat)
-                    
-                    fc_raw = ee.FeatureCollection(features)
-                    
-                    # 2.3 SPLIT DATA FOR VALIDATION
-                    fc_with_random = fc_raw.randomColumn()
-                    training_fc = fc_with_random.filter(ee.Filter.lt('random', p['split_ratio']))
-                    validation_fc = fc_with_random.filter(ee.Filter.gte('random', p['split_ratio']))
-                    
+                    # --- MODEL TRAINING ---
+                    if p['model_choice'] == "Artificial Neural Network (MLP)":
+                        # LOCAL ANN TRAINING
+                        X = df[input_bands].values
+                        y = df['class_val'].values.astype(int)
+                        
+                        from sklearn.model_selection import train_test_split
+                        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=(1-p['split_ratio']), random_state=42)
+                        
+                        scaler = StandardScaler()
+                        X_train_scaled = scaler.fit_transform(X_train)
+                        X_test_scaled = scaler.transform(X_test)
+                        
+                        mlp = MLPClassifier(
+                            hidden_layer_sizes=p['ann_layers'], max_iter=p['ann_iter'], 
+                            alpha=p['ann_alpha'], activation='relu', solver='adam', random_state=42
+                        )
+                        mlp.fit(X_train_scaled, y_train)
+                        
+                        y_pred = mlp.predict(X_test_scaled)
+                        overall_accuracy = accuracy_score(y_test, y_pred)
+                        kappa = cohen_kappa_score(y_test, y_pred)
+                        
+                        proxy_name = "Visual Proxy (Random Forest)"
+                        # Train proxy for map
+                        features = [ee.Feature(None, {k: row[k] for k in input_bands + ['class_val']}) for i, row in df.iterrows()]
+                        # Fix for Feature creation
+                        features = []
+                        for i, row in df.iterrows():
+                             features.append(ee.Feature(None, {
+                                'NDVI': row['NDVI'], 'EVI': row['EVI'], 'GNDVI': row['GNDVI'], 
+                                'NDWI': row['NDWI'], 'NDMI': row['NDMI'], 'class': int(row['class_val'])
+                            }))
+                        fc_raw = ee.FeatureCollection(features)
+                        trained_classifier = ee.Classifier.smileRandomForest(100).train(fc_raw, "class", input_bands)
+
+                    else:
+                        # GEE NATIVE MODELS
+                        features = []
+                        for i, row in df.iterrows():
+                            features.append(ee.Feature(None, {
+                                'NDVI': row['NDVI'], 'EVI': row['EVI'], 'GNDVI': row['GNDVI'], 
+                                'NDWI': row['NDWI'], 'NDMI': row['NDMI'], 'class': int(row['class_val'])
+                            }))
+                        
+                        fc_raw = ee.FeatureCollection(features)
+                        fc_with_random = fc_raw.randomColumn()
+                        training_fc = fc_with_random.filter(ee.Filter.lt('random', p['split_ratio']))
+                        validation_fc = fc_with_random.filter(ee.Filter.gte('random', p['split_ratio']))
+
+                        if p['model_choice'] == "Random Forest":
+                            classifier_inst = ee.Classifier.smileRandomForest(numberOfTrees=p['rf_trees'], seed=42)
+                        elif p['model_choice'] == "Support Vector Machine (SVM)":
+                            classifier_inst = ee.Classifier.libsvm(kernelType=p['svm_kernel'], gamma=p['svm_gamma'], cost=10)
+                        elif p['model_choice'] == "Gradient Tree Boost":
+                            classifier_inst = ee.Classifier.smileGradientTreeBoost(numberOfTrees=p['gtb_trees'], shrinkage=0.005, samplingRate=0.7, seed=42)
+                        elif p['model_choice'] == "CART (Decision Tree)":
+                            classifier_inst = ee.Classifier.smileCart()
+                        elif p['model_choice'] == "Naive Bayes":
+                            classifier_inst = ee.Classifier.smileNaiveBayes()
+
+                        trained_classifier = classifier_inst.train(training_fc, "class", input_bands)
+                        
+                        validated = validation_fc.classify(trained_classifier)
+                        error_matrix = validated.errorMatrix('class', 'classification')
+                        overall_accuracy = error_matrix.accuracy().getInfo()
+                        kappa = error_matrix.kappa().getInfo()
+                        proxy_name = p['model_choice']
+
                 except Exception as e:
-                    st.error(f"❌ Data Processing Error: {e}. Check CSV format.")
+                    st.error(f"❌ Processing Error: {e}")
                     st.stop()
-
-                # 3. PREPARE SATELLITE DATA
-                s2_collection = (
-                    ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
-                    .filterBounds(roi)
-                    .filterDate(p['start'], p['end'])
-                    .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", p['cloud']))
-                    .map(mask_s2_clouds) 
-                )
                 
-                if s2_collection.size().getInfo() == 0:
-                    st.error("No clear images found in this date range.")
-                    st.stop()
+                # Classify Map
+                if s2_collection.size().getInfo() > 0:
+                    indices_img = add_lulc_indices(s2_median)
+                    lulc_class = indices_img.select(input_bands).classify(trained_classifier)
                     
-                s2_median = s2_collection.median().clip(roi)
-                indices_img = add_lulc_indices(s2_median)
-
-                # 4. INSTANTIATE SELECTED MODEL
-                input_bands = ["NDVI", "EVI", "GNDVI", "NDWI", "NDMI"]
-                
-                if p['model_choice'] == "Random Forest":
-                    classifier_inst = ee.Classifier.smileRandomForest(numberOfTrees=p['rf_trees'], seed=42)
-                elif p['model_choice'] == "Support Vector Machine (SVM)":
-                    classifier_inst = ee.Classifier.libsvm(kernelType=p['svm_kernel'], gamma=p['svm_gamma'], cost=10)
-                elif p['model_choice'] == "Gradient Tree Boost":
-                    classifier_inst = ee.Classifier.smileGradientTreeBoost(numberOfTrees=p['gtb_trees'], shrinkage=0.005, samplingRate=0.7, seed=42)
-                elif p['model_choice'] == "CART (Decision Tree)":
-                    classifier_inst = ee.Classifier.smileCart()
-                elif p['model_choice'] == "Naive Bayes":
-                    classifier_inst = ee.Classifier.smileNaiveBayes()
-
-                # Train & Classify
-                trained_classifier = classifier_inst.train(
-                    features=training_fc,
-                    classProperty="class",
-                    inputProperties=input_bands
-                )
-                
-                lulc_class = indices_img.select(input_bands).classify(trained_classifier)
-                
-                # 5. ACCURACY ASSESSMENT
-                validated = validation_fc.classify(trained_classifier)
-                error_matrix = validated.errorMatrix('class', 'classification')
-                
-                overall_accuracy = error_matrix.accuracy().getInfo()
-                kappa = error_matrix.kappa().getInfo()
-                
-                # 6. VISUALIZATION
-                lulc_palette = ['#0000FF', '#006400', '#b2df8a', '#FF0000', '#8B4513', '#808080']
-                vis_params = {"min": 0, "max": 5, "palette": lulc_palette}
-                
-                col_map, col_res = st.columns([3, 1])
-                
-                with col_res:
-                    st.markdown('<div class="glass-card">', unsafe_allow_html=True)
-                    st.markdown('<div class="card-label">🧠 MODEL METRICS</div>', unsafe_allow_html=True)
-                    st.success(f"Architecture: {p['model_choice']}")
+                    # Vis
+                    lulc_palette = ['#0000FF', '#006400', '#b2df8a', '#FF0000', '#8B4513', '#808080']
+                    vis_params = {"min": 0, "max": 5, "palette": lulc_palette}
                     
-                    c_a, c_b = st.columns(2)
-                    c_a.markdown(f"""<div class="metric-value">{overall_accuracy:.2%}</div><div class="metric-sub">Overall Accuracy</div>""", unsafe_allow_html=True)
-                    c_b.markdown(f"""<div class="metric-value">{kappa:.3f}</div><div class="metric-sub">Kappa Coeff</div>""", unsafe_allow_html=True)
+                    m.addLayer(lulc_class, vis_params, f"LULC: {proxy_name}")
+                    m.add_legend(title="LULC Classes", legend_dict=dict(zip(class_names, lulc_palette)))
                     
-                    st.markdown("---")
-                    st.markdown(f"<div style='font-size:0.8rem'>Training Samples: {training_fc.size().getInfo()}</div>", unsafe_allow_html=True)
-                    st.markdown(f"<div style='font-size:0.8rem'>Validation Samples: {validation_fc.size().getInfo()}</div>", unsafe_allow_html=True)
-
-                    st.markdown("---")
-                    st.markdown('<div class="card-label">💾 EXPORT RESULT</div>', unsafe_allow_html=True)
-                    
-                    if st.button("☁️ Save to Drive"):
+                    # Metrics Display
+                    with col_res:
+                        st.markdown('<div class="glass-card">', unsafe_allow_html=True)
+                        st.markdown('<div class="card-label">🧠 MODEL METRICS</div>', unsafe_allow_html=True)
+                        st.success(f"Arch: {p['model_choice']}")
+                        
+                        c_a, c_b = st.columns(2)
+                        c_a.markdown(f"""<div class="metric-value">{overall_accuracy:.2%}</div><div class="metric-sub">Accuracy</div>""", unsafe_allow_html=True)
+                        c_b.markdown(f"""<div class="metric-value">{kappa:.3f}</div><div class="metric-sub">Kappa</div>""", unsafe_allow_html=True)
+                        
+                        st.markdown("---")
+                        st.markdown('<div class="card-label">💾 EXPORT</div>', unsafe_allow_html=True)
+                        if st.button("☁️ Save to Drive"):
                             ee.batch.Export.image.toDrive(
-                            image=lulc_class, description=f"LULC_{p['model_choice']}_{datetime.now().strftime('%Y%m%d')}", 
-                            scale=10, region=roi, folder='GEE_Exports'
-                        ).start()
-                            st.toast("Export Started to GDrive")
-                    
-                    st.markdown("---")
-                    if st.button("📷 Render Map (JPG)", key="lulc_jpg"):
-                        with st.spinner("Generating Map..."):
-                            buf = generate_static_map_display(
-                                lulc_class, roi, vis_params, 
-                                f"LULC | {p['model_choice']}", 
-                                is_categorical=True, 
-                                class_names=class_names
-                            )
-                            st.download_button("⬇️ Save Image", buf, f"Ni30_LULC_{datetime.now().date()}.jpg", "image/jpeg", use_container_width=True)
-                    
-                    st.markdown('</div>', unsafe_allow_html=True)
+                                image=lulc_class, description=f"LULC_Custom_{datetime.now().strftime('%Y%m%d')}", 
+                                scale=10, region=roi, folder='GEE_Exports'
+                            ).start()
+                            st.toast("Export Started")
 
-                with col_map:
-                    m = geemap.Map(height=700, basemap="HYBRID")
-                    m.centerObject(roi, 13)
-                    
-                    # Add RGB
-                    rgb_vis = {'min': 0, 'max': 0.3, 'bands': ['B4', 'B3', 'B2']}
-                    m.addLayer(s2_median, rgb_vis, 'RGB Composite')
-                    
-                    # Add LULC
-                    m.addLayer(lulc_class, vis_params, f"LULC: {p['model_choice']}")
-                    
-                    # Legend
-                    legend_dict = dict(zip(class_names, lulc_palette))
-                    m.add_legend(title="LULC Classes", legend_dict=legend_dict)
-                    m.to_streamlit()
+                        st.markdown("---")
+                        if st.button("📷 Render Map (JPG)"):
+                            with st.spinner("Generating Map..."):
+                                buf = generate_static_map_display(
+                                    lulc_class, roi, vis_params, f"LULC | {p['model_choice']}", 
+                                    is_categorical=True, class_names=class_names
+                                )
+                                st.download_button("⬇️ Save Image", buf, "Ni30_LULC.jpg", "image/jpeg", use_container_width=True)
+                        st.markdown('</div>', unsafe_allow_html=True)
+                else:
+                    st.error("No imagery to classify.")
+
+        with col_map:
+            m.to_streamlit()
