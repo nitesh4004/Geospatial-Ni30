@@ -13,6 +13,12 @@ from PIL import Image
 from datetime import datetime, timedelta
 import pandas as pd
 
+# --- CONSTANT: FIXED 15K LULC CSV (RAW GITHUB URL) ---
+LULC_15K_URL = (
+    "https://raw.githubusercontent.com/nitesh4004/Geospatial-Ni30/main/"
+    "LULC_Sentinel2_Indian_Region_15000rows.csv"
+)
+
 # --- 1. PAGE CONFIG ---
 st.set_page_config(
     page_title="NI30 Orbital Analytics",
@@ -150,14 +156,12 @@ st.markdown("""
 
 # --- 3. AUTHENTICATION ---
 try:
-    # Attempt to use Streamlit Secrets first
     service_account = st.secrets["gcp_service_account"]["client_email"]
     secret_dict = dict(st.secrets["gcp_service_account"])
     key_data = json.dumps(secret_dict)
     credentials = ee.ServiceAccountCredentials(service_account, key_data=key_data)
     ee.Initialize(credentials)
 except Exception:
-    # Fallback to local GEE auth
     try:
         ee.Initialize()
     except Exception as e:
@@ -275,10 +279,6 @@ def add_lulc_indices(image):
 
 def generate_static_map_display(image, roi, vis_params, title,
                                 cmap_colors=None, is_categorical=False, class_names=None):
-    """
-    Generates a static map (JPG) for download.
-    Handles both Continuous (Spectral) and Categorical (LULC) data.
-    """
     thumb_url = image.getThumbURL({
         'min': vis_params['min'], 'max': vis_params['max'],
         'palette': vis_params['palette'], 'region': roi,
@@ -293,7 +293,6 @@ def generate_static_map_display(image, roi, vis_params, title,
     ax.axis('off')
     ax.set_title(title, fontsize=14, fontweight='bold', pad=15, color='#00f2ff')
 
-    # LEGEND
     if is_categorical and class_names and 'palette' in vis_params:
         patches = [
             mpatches.Patch(color=color, label=name)
@@ -334,13 +333,12 @@ with st.sidebar:
         </div>
     """, unsafe_allow_html=True)
     
-    # MODE SELECTOR
     mode = st.radio("System Mode", ["Spectral Monitor", "LULC Classifier"], index=0)
     st.session_state['mode'] = mode
 
     st.markdown("---")
     
-    # --- 5.1 ROI SELECTION ---
+    # ROI SELECTION
     with st.container():
         st.markdown("### 1. Target Acquisition (ROI)")
         roi_method = st.radio(
@@ -379,8 +377,7 @@ with st.sidebar:
 
     st.markdown("---")
     
-    # --- 5.2 MODE SPECIFIC SETTINGS ---
-    # Init vars
+    # MODE-SPECIFIC SETTINGS
     rf_trees, svm_kernel, svm_gamma, gtb_trees = 100, 'RBF', 0.5, 100
     model_choice = "Random Forest"
 
@@ -444,16 +441,15 @@ with st.sidebar:
         }
         cur_palette = pal_map.get(pal_name, pal_map["Red-Yellow-Green"])
 
-    else:  # LULC MODE (MULTI-MODEL)
+    else:  # LULC MODE
         st.markdown("### 2. ML Architecture")
         
-        # 1. Model Selector
         model_choice = st.selectbox(
             "Select Classifier", 
-            ["Random Forest", "Support Vector Machine (SVM)", "Gradient Tree Boost", "CART (Decision Tree)", "Naive Bayes"]
+            ["Random Forest", "Support Vector Machine (SVM)",
+             "Gradient Tree Boost", "CART (Decision Tree)", "Naive Bayes"]
         )
 
-        # 2. Dynamic Hyperparameters
         if model_choice == "Random Forest":
             rf_trees = st.slider("Number of Trees", 10, 500, 150)
         elif model_choice == "Support Vector Machine (SVM)":
@@ -473,22 +469,7 @@ with st.sidebar:
 
         st.markdown("---")
         st.markdown("### 3. Training Data")
-        train_data_mode = st.radio(
-            "Training Data Source",
-            ["Upload CSV (15k)", "Use Default URL"],
-            index=0
-        )
-        train_csv_file = None
-        if train_data_mode == "Upload CSV (15k)":
-            train_csv_file = st.file_uploader(
-                "Upload LULC Training CSV (with NDVI, EVI, GNDVI, NDWI, NDMI, NDBI)",
-                type=["csv"],
-                key="train_csv_uploader"
-            )
-
-        # Persist in session
-        st.session_state['train_data_mode'] = train_data_mode
-        st.session_state['train_csv_file'] = train_csv_file
+        st.info("Using fixed 15k Sentinel-2 LULC CSV from GitHub (no upload).")
 
     st.markdown("---")
     st.markdown("### 4. Temporal Window")
@@ -521,12 +502,6 @@ with st.sidebar:
                     'vmax': vmax,
                     'palette': cur_palette
                 })
-            # training data config
-            if mode == "LULC Classifier":
-                params.update({
-                    'train_data_mode': st.session_state.get('train_data_mode', "Upload CSV (15k)"),
-                    'train_csv_file': st.session_state.get('train_csv_file', None)
-                })
             st.session_state.update(params)
             st.session_state['dates'] = []
         else:
@@ -547,7 +522,6 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 if not st.session_state['calculated']:
-    # Welcome View
     st.markdown("""
     <div class="glass-card" style="text-align:center; padding:40px;">
         <h2 style="color:#fff;">📡 WAITING FOR INPUT</h2>
@@ -568,9 +542,9 @@ else:
     roi = st.session_state['roi']
     p = st.session_state
     
-    # ==========================================
+    # =========================
     # MODE 1: SPECTRAL MONITOR
-    # ==========================================
+    # =========================
     if p['mode'] == "Spectral Monitor":
         with st.spinner("🛰️ Establishing Uplink... Processing Earth Engine Data..."):
             if p['platform'] == "Sentinel-2 (Optical)":
@@ -688,27 +662,15 @@ else:
                 m.add_colorbar(vis, label=p['idx'], layer_name="Legend")
                 m.to_streamlit()
 
-    # ==========================================
-    # MODE 2: MULTI-MODEL LULC CLASSIFIER
-    # ==========================================
+    # =========================
+    # MODE 2: LULC CLASSIFIER
+    # =========================
     elif p['mode'] == "LULC Classifier":
-        train_data_mode = p.get('train_data_mode', "Upload CSV (15k)")
-        train_csv_file = p.get('train_csv_file', None)
-
         with st.spinner(f"🧠 Initializing {p['model_choice']} & Training..."):
-            # 1. LOAD TRAINING DATA
+            # 1. LOAD TRAINING DATA FROM FIXED 15K CSV
             try:
-                if train_data_mode == "Upload CSV (15k)" and train_csv_file is not None:
-                    df = pd.read_csv(train_csv_file)
-                else:
-                    # Fallback: default URL (old 10k CSV) if no upload
-                    DEFAULT_TRAIN_URL = (
-                        "https://raw.githubusercontent.com/nitesh4004/Geospatial-Ni30/main/"
-                        "lulc_spectral_indices_10000.csv"
-                    )
-                    df = pd.read_csv(DEFAULT_TRAIN_URL)
+                df = pd.read_csv(LULC_15K_URL)
 
-                # Define class names consistent with 12-class 15k CSV
                 class_names = [
                     "Water",          # 0
                     "Dense Forest",   # 1
@@ -725,7 +687,6 @@ else:
                 ]
                 class_lut = {name: idx for idx, name in enumerate(class_names)}
 
-                # Ensure numeric 'class' column
                 if "class" not in df.columns:
                     if "LULC_ID" in df.columns:
                         df["class"] = df["LULC_ID"]
@@ -735,7 +696,6 @@ else:
                 df = df.dropna(subset=["class"])
                 df["class"] = df["class"].astype(int)
 
-                # LIMIT TO REQUIRED COLUMNS
                 feature_cols = ["NDVI", "EVI", "GNDVI", "NDWI", "NDMI", "NDBI", "class"]
                 missing = [c for c in feature_cols if c not in df.columns]
                 if missing:
@@ -744,7 +704,6 @@ else:
 
                 df_feat = df[feature_cols]
 
-                # Create Feature Collection
                 features = [
                     ee.Feature(
                         None,
@@ -762,16 +721,15 @@ else:
                 ]
                 fc_raw = ee.FeatureCollection(features)
 
-                # 1.1 SPLIT DATA FOR VALIDATION
                 fc_with_random = fc_raw.randomColumn()
                 training_fc = fc_with_random.filter(ee.Filter.lt('random', p['split_ratio']))
                 validation_fc = fc_with_random.filter(ee.Filter.gte('random', p['split_ratio']))
 
             except Exception as e:
-                st.error(f"❌ Data Load Error: {e}. Check CSV format/URL.")
+                st.error(f"❌ Data Load Error: {e}. Check GitHub CSV URL or network.")
                 st.stop()
 
-            # 2. PREPARE SATELLITE DATA
+            # 2. SENTINEL-2 MOSAIC & INDICES
             s2_collection = (
                 ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
                 .filterBounds(roi)
@@ -787,7 +745,7 @@ else:
             s2_median = s2_collection.median().clip(roi)
             indices_img = add_lulc_indices(s2_median)
 
-            # 3. INSTANTIATE SELECTED MODEL
+            # 3. MODEL SETUP
             input_bands = ["NDVI", "EVI", "GNDVI", "NDWI", "NDMI", "NDBI"]
             
             if p['model_choice'] == "Random Forest":
@@ -826,7 +784,7 @@ else:
             
             lulc_class = indices_img.select(input_bands).classify(trained_classifier)
             
-            # 4. ACCURACY ASSESSMENT
+            # 4. ACCURACY
             validated = validation_fc.classify(trained_classifier)
             error_matrix = validated.errorMatrix('class', 'classification')
             
@@ -917,11 +875,8 @@ else:
                 m = geemap.Map(height=700, basemap="HYBRID")
                 m.centerObject(roi, 13)
                 
-                # Add RGB
                 rgb_vis = {'min': 0, 'max': 0.3, 'bands': ['B4', 'B3', 'B2']}
                 m.addLayer(s2_median, rgb_vis, 'RGB Composite')
-                
-                # Add LULC
                 m.addLayer(lulc_class, vis_params, f"LULC: {p['model_choice']}")
                 
                 legend_dict = dict(zip(class_names, lulc_palette))
