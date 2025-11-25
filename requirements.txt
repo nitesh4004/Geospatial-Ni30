@@ -1,7 +1,9 @@
 streamlit
-geemap
 earthengine-api
-matplotlib
+geemap
+pandas
 numpy
+scikit-learn
+matplotlib
 requests
 Pillow
