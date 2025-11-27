@@ -7,3 +7,4 @@ scikit-learn
 matplotlib
 requests
 Pillow
+geopandas
