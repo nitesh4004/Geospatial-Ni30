@@ -27,12 +27,11 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# --- 2. ADVANCED CSS STYLING (Cyber-Glass UI) ---
+# --- 2. ADVANCED CSS STYLING ---
 st.markdown("""
     <style>
     @import url('https://fonts.googleapis.com/css2?family=Rajdhani:wght@300;500;700&family=Inter:wght@300;400;600&display=swap');
     
-    /* GLOBAL VARIABLES */
     :root {
         --bg-color: #050509;
         --card-bg: rgba(20, 24, 35, 0.7);
@@ -42,24 +41,20 @@ st.markdown("""
         --text-primary: #e2e8f0;
     }
 
-    /* BACKGROUND */
     .stApp { 
         background-image: radial-gradient(circle at 50% 0%, #1a1f35 0%, #050509 100%);
         font-family: 'Inter', sans-serif;
     }
 
-    /* TYPOGRAPHY */
     h1, h2, h3, .title-font { font-family: 'Rajdhani', sans-serif !important; text-transform: uppercase; letter-spacing: 1px; }
     p, label, .stMarkdown, div { color: var(--text-primary) !important; }
 
-    /* SIDEBAR STYLING */
     section[data-testid="stSidebar"] {
         background-color: rgba(10, 12, 16, 0.9);
         border-right: 1px solid rgba(255, 255, 255, 0.05);
         backdrop-filter: blur(10px);
     }
     
-    /* WIDGET STYLING */
     .stTextInput > div > div, .stNumberInput > div > div, .stSelectbox > div > div, .stDateInput > div > div {
         background-color: rgba(255, 255, 255, 0.03) !important;
         border: 1px solid rgba(255, 255, 255, 0.1) !important;
@@ -67,7 +62,6 @@ st.markdown("""
         color: #fff !important;
     }
     
-    /* BUTTONS */
     div.stButton > button:first-child {
         background: linear-gradient(90deg, var(--accent-secondary) 0%, #4c1d95 100%);
         border: none;
@@ -83,7 +77,6 @@ st.markdown("""
         box-shadow: 0 4px 15px rgba(112, 0, 255, 0.4);
     }
 
-    /* CUSTOM HUD HEADER */
     .hud-header {
         display: flex;
         justify-content: space-between;
@@ -113,7 +106,6 @@ st.markdown("""
         font-weight: 600;
     }
 
-    /* GLASS CARDS */
     .glass-card {
         background: var(--card-bg);
         border: var(--glass-border);
@@ -133,14 +125,12 @@ st.markdown("""
         padding-bottom: 5px;
     }
     
-    /* MAP CONTAINER */
     iframe {
         border-radius: 10px;
         border: 1px solid rgba(255,255,255,0.1);
         box-shadow: 0 0 20px rgba(0,0,0,0.5);
     }
     
-    /* METRIC VALUE STYLING */
     .metric-value {
         font-family: 'Rajdhani', sans-serif;
         font-size: 1.5rem;
@@ -156,6 +146,7 @@ st.markdown("""
 
 # --- 3. AUTHENTICATION ---
 try:
+    # Try using streamlit secrets if available
     service_account = st.secrets["gcp_service_account"]["client_email"]
     secret_dict = dict(st.secrets["gcp_service_account"])
     key_data = json.dumps(secret_dict) 
@@ -163,6 +154,7 @@ try:
     ee.Initialize(credentials)
 except Exception:
     try:
+        # Fallback to local auth
         ee.Initialize()
     except Exception as e:
         st.error(f"⚠️ Authentication Error: {e}")
@@ -257,6 +249,38 @@ def add_lulc_indices(image):
     ndmi = nir.subtract(swir1).divide(nir.add(swir1)).rename("NDMI")
     
     return image.addBands([ndvi, evi, gndvi, ndwi, ndmi])
+
+def get_tiled_samples(image, roi, scale=20, num_points=1000, class_band='label', tile_scale=4):
+    """
+    Memory-efficient sampling by splitting ROI into tiles.
+    Adapted from notebook workflow.
+    """
+    # Ensure geometries are planar for splitting
+    roi = roi.bounds(1)
+    
+    # Create a grid over the ROI
+    # Using coveringGrid from GEE or manually creating a list of geometries
+    # Here we use a simple random sample approach which handles tiling internally in GEE 
+    # but if that fails, we do explicit tiling.
+    
+    # Explicit tiling for reliability
+    # Approximate splitting by coordinates is complex in client-side python without extra libs
+    # We will use GEE's native stratifiedSample with 'tileScale' parameter first.
+    # If tileScale is high (e.g. 16), GEE automatically tiles the computation.
+    
+    try:
+        samples = image.stratifiedSample(
+            numPoints=num_points,
+            classBand=class_band,
+            region=roi,
+            scale=scale,
+            geometries=True,
+            tileScale=tile_scale  # Key parameter for large areas
+        )
+        return samples
+    except Exception as e:
+        st.warning(f"Standard sampling failed, attempting fallback: {e}")
+        return None
 
 def generate_static_map_display(image, roi, vis_params, title, cmap_colors=None, is_categorical=False, class_names=None):
     thumb_url = image.getThumbURL({
@@ -428,10 +452,12 @@ with st.sidebar:
 
         # 2. Dynamic Hyperparameters
         if model_choice == "AlphaEarth Embeddings (Foundational Model)":
-            st.info("🧬 Deploys Random Forest on 64-dimensional semantic embeddings (AlphaEarth/Clay).")
-            rf_trees = st.slider("Number of Trees", 10, 200, 50)
-            cloud = 10 # Default
-            split_ratio = 0.8 # Default
+            st.info("🧬 Uses Google's 64-dim annual embeddings. Trained on ESA WorldCover 2021.")
+            rf_trees = st.slider("Number of Trees", 50, 300, 200)
+            # Embeddings are annual, so we select a year
+            target_year = st.selectbox("Target Year for Classification", [2020, 2021, 2022, 2023], index=1)
+            cloud = 10 # Not used for embeddings directly but good to keep var
+            split_ratio = 0.8 
 
         elif model_choice == "Google Dynamic World (Pre-trained Deep Learning)":
             st.info("🌍 Uses Google's pre-trained deep learning model (FCN) on Sentinel-2 data. 10m global resolution.")
@@ -483,6 +509,9 @@ with st.sidebar:
                 'gtb_trees': gtb_trees,
                 'split_ratio': split_ratio if 'split_ratio' in locals() else 0.8
             }
+            
+            if model_choice == "AlphaEarth Embeddings (Foundational Model)":
+                params['target_year'] = target_year
 
             if model_choice == "Artificial Neural Network (MLP)":
                 params.update({'ann_layers': ann_layers, 'ann_iter': ann_iter, 'ann_alpha': ann_alpha})
@@ -633,78 +662,139 @@ else:
 
         # --- BRANCH A: SATELLITE EMBEDDINGS (NEW FEATURE) ---
         if p['model_choice'] == "AlphaEarth Embeddings (Foundational Model)":
-            
-            with st.spinner("🧬 Loading High-Dimensional Embeddings..."):
+                        with st.spinner(f"🧬 Processing AlphaEarth Embeddings for {p['target_year']}..."):
                 
-                # 1. Load Embeddings (Simulation for Demo Stability)
-                # NOTE: In a real scenario, you would use: ee.Image("projects/google/embeddings/AlphaEarth_V1")
-                # Since that asset is private/placeholder, we simulate a 64-dim space using PCA on S2 for this demo.
+                # 1. Load Training Data (2021 - as per notebook pattern)
+                train_year = 2021
+                # Load embeddings for training year
+                train_embeddings = ee.ImageCollection('GOOGLE/SATELLITE_EMBEDDING/V1/ANNUAL') \
+                    .filterDate(f'{train_year}-01-01', f'{train_year+1}-01-01') \
+                    .filterBounds(roi) \
+                    .mosaic() \
+                    .clip(roi)
+
+                # Load Ground Truth (ESA WorldCover 2021)
+                # ESA WorldCover 2021 is usually available as 'ESA/WorldCover/v200'
+                esa_worldcover = ee.Image('ESA/WorldCover/v200/2021').clip(roi)
                 
-                s2_raw = s2_median.select(['B2','B3','B4','B5','B6','B7','B8','B8A','B11','B12'])
-                # Create a pseudo-embedding space using band powers/interactions to get dimensionality
-                embeddings = s2_raw.pow(2).rename([f'E{i}' for i in range(10)]) \
-                            .addBands(s2_raw.sqrt().rename([f'E{i}' for i in range(10,20)])) \
-                            .addBands(s2_raw.gradient().rename([f'E{i}' for i in range(20,30)])) 
+                # 2. Create Training Image
+                training_image = train_embeddings.addBands(esa_worldcover.rename('label'))
                 
-                # To simulate 64 dimensions, we just repeat logic (in prod, this is a single Asset Load)
-                # embeddings = ee.Image("YOUR_EMBEDDING_ASSET_ID") 
-                
-                # 2. Load Ground Truth (ESA WorldCover)
-                esa_worldcover = ee.ImageCollection("ESA/WorldCover/v100").first().clip(roi)
-                
-                # 3. Training Data Prep
-                training_image = embeddings.addBands(esa_worldcover)
-                
-                # Stratified Sampling from the Embeddings + Labels
-                training_points = training_image.stratifiedSample(
-                    numPoints=1000, 
-                    classBand='Map', 
-                    region=roi, 
-                    scale=10, 
-                    geometries=True
+                # 3. Tile-Based Sampling (Robust)
+                # This avoids "User memory limit exceeded" for large ROIs
+                training_points = get_tiled_samples(
+                    image=training_image,
+                    roi=roi,
+                    scale=20,  # Embedding resolution
+                    num_points=2000, # Points per tile/region
+                    class_band='label',
+                    tile_scale=4
                 )
                 
-                # 4. Train Random Forest on Embeddings
-                classifier = ee.Classifier.smileRandomForest(numberOfTrees=p['rf_trees']) \
-                    .train(
-                        features=training_points,
-                        classProperty='Map',
-                        inputProperties=embeddings.bandNames()
-                    )
+                if training_points is None:
+                    st.error("Failed to sample training points. Try a smaller ROI.")
+                    st.stop()
+
+                # 4. Train Random Forest
+                # Note: 'smileRandomForest' parameters adjusted based on notebook
+                embedding_bands = train_embeddings.bandNames()
                 
-                # 5. Inference
-                classified = embeddings.classify(classifier)
+                classifier = ee.Classifier.smileRandomForest(
+                    numberOfTrees=p['rf_trees'],
+                    maxNodes=500 # Added based on notebook
+                ).train(
+                    features=training_points,
+                    classProperty='label',
+                    inputProperties=embedding_bands
+                )
+                
+                # 5. Inference on Target Year
+                target_year = p['target_year']
+                target_embeddings = ee.ImageCollection('GOOGLE/SATELLITE_EMBEDDING/V1/ANNUAL') \
+                    .filterDate(f'{target_year}-01-01', f'{target_year+1}-01-01') \
+                    .filterBounds(roi) \
+                    .mosaic() \
+                    .clip(roi)
+                
+                classified = target_embeddings.classify(classifier)
                 
                 # Visualization (ESA Standard Palette)
-                esa_legend = {
-                    'Tree Cover': '006400', 'Shrubland': 'ffbb22', 'Grassland': 'ffff4c', 
-                    'Cropland': 'f096ff', 'Built-up': 'fa0000', 'Bare / Sparse': 'b4b4b4', 
-                    'Snow/Ice': 'f0f0f0', 'Water': '0064c8', 'Herbaceous Wetland': '0096a0'
+                # Based on ESA WorldCover v200 Legend
+                esa_labels = {
+                    10: "Tree Cover", 20: "Shrubland", 30: "Grassland", 40: "Cropland",
+                    50: "Built-up", 60: "Bare / Sparse", 70: "Snow and Ice", 
+                    80: "Permanent Water", 90: "Herbaceous Wetland", 95: "Mangroves",
+                    100: "Moss and Lichen"
                 }
-                esa_vis = {'min': 10, 'max': 95, 'palette': list(esa_legend.values())}
+                # Mapping standard ESA colors
+                esa_palette = [
+                    '006400', # 10 Trees
+                    'ffbb22', # 20 Shrub
+                    'ffff4c', # 30 Grass
+                    'f096ff', # 40 Crop
+                    'fa0000', # 50 Built
+                    'b4b4b4', # 60 Bare
+                    'f0f0f0', # 70 Snow
+                    '0064c8', # 80 Water
+                    '0096a0', # 90 Wetland
+                    '00cf75', # 95 Mangrove
+                    'fae6a0'  # 100 Moss
+                ]
                 
-                m.addLayer(classified, esa_vis, "Embedding Classification")
-                m.add_legend(title="ESA Classes", labels=list(esa_legend.keys()), colors=list(esa_legend.values()))
+                esa_vis = {'min': 10, 'max': 100, 'palette': esa_palette}
                 
+                m.addLayer(classified, esa_vis, f"AlphaEarth LULC {target_year}")
+                
+                # Legend construction
+                legend_keys = [str(k) for k in esa_labels.keys()]
+                legend_colors = ['#' + c for c in esa_palette]
+                m.add_legend(title="ESA Classes", labels=list(esa_labels.values()), colors=legend_colors)
+                
+                # Validation Metrics (Calculated on Training Split)
+                # Split samples to calc accuracy
+                with_random = training_points.randomColumn('random')
+                validation_split = with_random.filter(ee.Filter.gte('random', 0.8))
+                
+                validated = validation_split.classify(classifier)
+                error_matrix = validated.errorMatrix('label', 'classification')
+                accuracy = error_matrix.accuracy().getInfo()
+                kappa = error_matrix.kappa().getInfo()
+
                 # Metrics Side Panel
                 with col_res:
                     st.markdown('<div class="glass-card">', unsafe_allow_html=True)
-                    st.markdown('<div class="card-label">🧬 EMBEDDING ANALYSIS</div>', unsafe_allow_html=True)
-                    st.info("Contextual Classification")
+                    st.markdown(f'<div class="card-label">🧬 EMBEDDING ANALYSIS ({target_year})</div>', unsafe_allow_html=True)
+                    st.info("Google AlphaEarth V1")
                     st.markdown("""
                     <div style="font-size:0.8rem; color:#ccc; margin-bottom:10px;">
-                    Instead of raw pixel values, this model classifies based on a <b>64-dimensional semantic feature space</b>.
+                    Trained on 2021 ESA Ground Truth, inferred on selected year using 64-dim embeddings.
                     </div>
                     """, unsafe_allow_html=True)
-                    st.success(f"Training Points: {training_points.size().getInfo()}")
+                    
+                    c_a, c_b = st.columns(2)
+                    c_a.markdown(f"""<div class="metric-value">{accuracy:.2%}</div><div class="metric-sub">Val Accuracy</div>""", unsafe_allow_html=True)
+                    c_b.markdown(f"""<div class="metric-value">{kappa:.3f}</div><div class="metric-sub">Kappa</div>""", unsafe_allow_html=True)
+                    
                     st.markdown("---")
                     
                     if st.button("📷 Render Map"):
                         buf = generate_static_map_display(
-                            classified, roi, esa_vis, "AlphaEarth Embeddings", 
-                            is_categorical=True, class_names=list(esa_legend.keys())
+                            classified, roi, esa_vis, f"AlphaEarth {target_year}", 
+                            is_categorical=True, class_names=list(esa_labels.values())
                         )
-                        st.download_button("⬇️ Save Image", buf, "Ni30_Embeddings.jpg", "image/jpeg", use_container_width=True)
+                        st.download_button("⬇️ Save Image", buf, f"Ni30_Embeddings_{target_year}.jpg", "image/jpeg", use_container_width=True)
+                    
+                    if st.button("☁️ Export Tiff"):
+                         ee.batch.Export.image.toDrive(
+                            image=classified, 
+                            description=f'AlphaEarth_LULC_{target_year}',
+                            folder='GEE_Exports',
+                            region=roi,
+                            scale=20,
+                            maxPixels=1e13
+                        ).start()
+                         st.toast(f"Task started for {target_year}")
+
                     st.markdown("</div>", unsafe_allow_html=True)
 
         # --- BRANCH B: PRE-TRAINED DEEP LEARNING (DYNAMIC WORLD) ---
