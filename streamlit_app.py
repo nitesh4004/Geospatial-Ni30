@@ -330,7 +330,7 @@ def generate_static_map_display(image, roi, vis_params, title, cmap_colors=None,
     lats = [p[1] for p in bounds_poly]
     extent = [min(lons), max(lons), min(lats), max(lats)]
     
-    fig, ax = plt.subplots(figsize=(10, 10), dpi=300, facecolor='#050509')
+    fig, ax = plt.subplots(figsize=(10, 10), dpi=600, facecolor='#050509')
     ax.set_facecolor('#050509')
     
     # Plot Image with geographic extent
@@ -1083,3 +1083,4 @@ else:
 
         with col_map:
             m.to_streamlit()
+
