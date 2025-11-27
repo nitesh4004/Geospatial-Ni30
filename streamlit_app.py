@@ -258,40 +258,123 @@ def add_lulc_indices(image):
     
     return image.addBands([ndvi, evi, gndvi, ndwi, ndmi])
 
+def add_scale_bar(ax, bounds):
+    """
+    Adds a scale bar to the matplotlib axes based on bounding box coordinates (WGS84).
+    bounds: [min_lon, min_lat, max_lon, max_lat]
+    """
+    min_x, min_y, max_x, max_y = bounds
+    
+    # Calculate center lat for approximation
+    center_lat = (min_y + max_y) / 2
+    
+    # Approx degrees per meter
+    # Lat: 1 deg ~= 111320 m
+    # Lon: 1 deg ~= 111320 * cos(lat) m
+    met_per_deg_lat = 111320
+    met_per_deg_lon = 111320 * np.cos(np.radians(center_lat))
+    
+    # Width of map in meters
+    width_deg = max_x - min_x
+    width_met = width_deg * met_per_deg_lon
+    
+    # Target scale bar size: ~1/5 of map width
+    target_len_met = width_met / 5
+    
+    # Round to nice number
+    order = 10 ** np.floor(np.log10(target_len_met))
+    nice_len_met = round(target_len_met / order) * order
+    
+    # Convert back to degrees for plotting
+    nice_len_deg = nice_len_met / met_per_deg_lon
+    
+    # Position: Bottom right corner, with padding
+    pad_x = width_deg * 0.05
+    pad_y = (max_y - min_y) * 0.05
+    
+    start_x = max_x - pad_x - nice_len_deg
+    start_y = min_y + pad_y
+    
+    # Draw line (white background bar for visibility)
+    # rect_bg = mpatches.Rectangle((start_x - nice_len_deg*0.1, start_y - (max_y-min_y)*0.02), 
+    #                              nice_len_deg * 1.2, (max_y-min_y)*0.06, 
+    #                              linewidth=0, facecolor='black', alpha=0.5)
+    # ax.add_patch(rect_bg)
+    
+    # Draw scale bar
+    rect = mpatches.Rectangle((start_x, start_y), nice_len_deg, (max_y-min_y)*0.008, 
+                              linewidth=1, edgecolor='white', facecolor='white')
+    ax.add_patch(rect)
+    
+    # Add text
+    label = f"{int(nice_len_met/1000)} km" if nice_len_met >= 1000 else f"{int(nice_len_met)} m"
+    ax.text(start_x + nice_len_deg/2, start_y + (max_y-min_y)*0.02, label, 
+            color='white', ha='center', va='bottom', fontsize=10, fontweight='bold',
+            path_effects=[plt.matplotlib.patheffects.withStroke(linewidth=2, foreground="black")])
+
+
 def generate_static_map_display(image, roi, vis_params, title, cmap_colors=None, is_categorical=False, class_names=None):
+    # Fetch image with CRS 4326 to match Lat/Lon extent
     thumb_url = image.getThumbURL({
         'min': vis_params['min'], 'max': vis_params['max'],
         'palette': vis_params['palette'], 'region': roi,
-        'dimensions': 600, 'format': 'png'
+        'dimensions': 600, 'format': 'png',
+        'crs': 'EPSG:4326' 
     })
     response = requests.get(thumb_url)
     img_pil = Image.open(BytesIO(response.content))
     
-    fig, ax = plt.subplots(figsize=(8, 8), dpi=600, facecolor='#050509')
-    ax.set_facecolor('#050509')
-    ax.imshow(img_pil)
-    ax.axis('off')
-    ax.set_title(title, fontsize=14, fontweight='bold', pad=15, color='#00f2ff')
+    # Calculate Extent for Lat/Lon Grid
+    bounds_poly = roi.bounds().getInfo()['coordinates'][0]
+    lons = [p[0] for p in bounds_poly]
+    lats = [p[1] for p in bounds_poly]
+    extent = [min(lons), max(lons), min(lats), max(lats)]
     
+    fig, ax = plt.subplots(figsize=(10, 10), dpi=300, facecolor='#050509')
+    ax.set_facecolor('#050509')
+    
+    # Plot Image with geographic extent
+    im = ax.imshow(img_pil, extent=extent, aspect='auto')
+    
+    # TITLE
+    ax.set_title(title, fontsize=16, fontweight='bold', pad=20, color='#00f2ff')
+    
+    # LAT/LONG GRID & TICKS
+    ax.tick_params(colors='white', labelcolor='white', labelsize=8)
+    ax.grid(color='white', linestyle='--', linewidth=0.5, alpha=0.2)
+    for spine in ax.spines.values():
+        spine.set_edgecolor('white')
+        spine.set_alpha(0.3)
+    
+    # SCALE BAR
+    try:
+        add_scale_bar(ax, extent)
+    except Exception as e:
+        print(f"Scale bar error: {e}")
+
+    # LEGEND / COLORBAR
     if is_categorical and class_names and 'palette' in vis_params:
         patches = []
         for name, color in zip(class_names, vis_params['palette']):
             patches.append(mpatches.Patch(color=color, label=name))
         
-        legend = ax.legend(handles=patches, loc='center left', bbox_to_anchor=(1.05, 0.5), 
-                           frameon=False, title="Classes")
+        # Place legend outside or neatly inside
+        legend = ax.legend(handles=patches, loc='upper center', bbox_to_anchor=(0.5, -0.05), 
+                           frameon=False, title="Classes", ncol=3)
         plt.setp(legend.get_title(), color='white', fontweight='bold')
         for text in legend.get_texts():
             text.set_color("white")
             
     elif cmap_colors:
+        # Continuous Colorbar
         cmap = mcolors.LinearSegmentedColormap.from_list("custom", cmap_colors)
         norm = mcolors.Normalize(vmin=vis_params['min'], vmax=vis_params['max'])
         sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
         sm.set_array([])
-        cax = fig.add_axes([0.92, 0.15, 0.03, 0.7])
+        cax = fig.add_axes([0.92, 0.15, 0.03, 0.7]) # [left, bottom, width, height]
         cbar = plt.colorbar(sm, cax=cax)
         cbar.ax.yaxis.set_tick_params(color='white')
+        cbar.set_label('Value', color='white')
         plt.setp(plt.getp(cbar.ax.axes, 'yticklabels'), color='white')
     
     buf = BytesIO()
@@ -924,29 +1007,14 @@ else:
                     
                     # Visualization (ESA Palette)
                     # ESA classes: 10, 20, 30, 40, 50, 60, 70, 80, 90, 95, 100
-                    esa_palette = [
-                        '006400', 'ffbb22', 'ffff4c', 'f096ff', 'fa0000', 
-                        'b4b4b4', 'f0f0f0', '0064c8', '0096a0', '00cf75', 'fae6a0'
-                    ]
-                    # Remap ESA values to 0..N for palette (optional, but ESA values are sparse)
-                    # Or just use a custom visualization if we know the classes present.
-                    # Simply use ESA style if possible.
-                    # Actually, GEE handles sparse classes if we define min/max/palette correctly, 
-                    # but usually simpler to remap. ESA: 10=Trees, 20=Shrub, ... 
-                    # We will use a simpler approach for display matching Dynamic World style or ESA style.
-                    
-                    # Display
-                    # ESA WorldCover visualization params need to map values to colors
-                    # We construct a style manually or use the raw values if palette covers full range (it doesn't)
-                    # Let's just use random colors for unique classes found or a fixed map
                     
                     # Map specific ESA classes to colors
                     class_values = [10, 20, 30, 40, 50, 60, 80, 90, 95, 100]
+                    class_names_esa = ['Trees', 'Shrubland', 'Grassland', 'Cropland', 'Built-up', 'Bare/Sparse', 'Water', 'Herbaceous Wetland', 'Mangroves', 'Moss/Lichen']
                     class_colors = ['#006400', '#ffbb22', '#ffff4c', '#f096ff', '#fa0000', 
                                     '#b4b4b4', '#0064c8', '#0096a0', '#00cf75', '#fae6a0']
                     
                     # Filter classified image to only valid classes and visualize
-                    # Using slm is tricky with sparse values. Let's try to remap for vis
                     remapped = classified.remap(class_values, list(range(len(class_values))))
                     vis_remap = {'min': 0, 'max': len(class_values)-1, 'palette': class_colors}
                     
@@ -963,6 +1031,15 @@ else:
                                 scale=20, region=roi, folder='GEE_Exports'
                             ).start()
                             st.toast("Export task started")
+                         
+                         st.markdown("---")
+                         if st.button("📷 Render Map (JPG)"):
+                             with st.spinner("Generating Map..."):
+                                 buf = generate_static_map_display(
+                                     remapped, roi, vis_remap, f"LULC (Embeddings) | {target_year}", 
+                                     is_categorical=True, class_names=class_names_esa
+                                 )
+                                 st.download_button("⬇️ Save Image", buf, "Ni30_Emb_LULC.jpg", "image/jpeg", use_container_width=True)
                          st.markdown('</div>', unsafe_allow_html=True)
 
                 else:
@@ -995,8 +1072,13 @@ else:
                     st.info("Unsupervised grouping of terrain features.")
                     st.caption("Useful for detecting water bodies or major land changes without labels.")
                     st.markdown("---")
-                    if st.button("Generate GIF"):
-                        st.toast("GIF generation requires time-series export. (Demo feature)")
+                    if st.button("📷 Render Map (JPG)"):
+                             with st.spinner("Generating Map..."):
+                                 buf = generate_static_map_display(
+                                     result, roi, cluster_vis, f"Clusters | {target_year}", 
+                                     is_categorical=False # Clusters are cat, but random colors make legend hard
+                                 )
+                                 st.download_button("⬇️ Save Image", buf, "Ni30_Clusters.jpg", "image/jpeg", use_container_width=True)
                     st.markdown('</div>', unsafe_allow_html=True)
 
         with col_map:
