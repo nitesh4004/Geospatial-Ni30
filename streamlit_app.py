@@ -156,13 +156,19 @@ st.markdown("""
 
 # --- 3. AUTHENTICATION ---
 try:
-    service_account = st.secrets["gcp_service_account"]["client_email"]
-    secret_dict = dict(st.secrets["gcp_service_account"])
-    key_data = json.dumps(secret_dict) 
-    credentials = ee.ServiceAccountCredentials(service_account, key_data=key_data)
-    ee.Initialize(credentials)
-except Exception:
+    # Attempt to use Streamlit Secrets if available
+    if "gcp_service_account" in st.secrets:
+        service_account = st.secrets["gcp_service_account"]["client_email"]
+        secret_dict = dict(st.secrets["gcp_service_account"])
+        key_data = json.dumps(secret_dict) 
+        credentials = ee.ServiceAccountCredentials(service_account, key_data=key_data)
+        ee.Initialize(credentials)
+    else:
+        # Fallback to local auth
+        ee.Initialize()
+except Exception as e:
     try:
+        ee.Authenticate()
         ee.Initialize()
     except Exception as e:
         st.error(f"⚠️ Authentication Error: {e}")
@@ -252,61 +258,30 @@ def add_lulc_indices(image):
     evi = image.expression(
         "2.5 * ((NIR - RED) / (NIR + 6 * RED - 7.5 * BLUE + 1))",
         {"NIR": nir, "RED": red, "BLUE": blue}
-    ).rename("EVI")
+    )
     ndwi = green.subtract(nir).divide(green.add(nir)).rename("NDWI")
     ndmi = nir.subtract(swir1).divide(nir.add(swir1)).rename("NDMI")
     
     return image.addBands([ndvi, evi, gndvi, ndwi, ndmi])
 
 def add_scale_bar(ax, bounds):
-    """
-    Adds a scale bar to the matplotlib axes based on bounding box coordinates (WGS84).
-    bounds: [min_lon, min_lat, max_lon, max_lat]
-    """
     min_x, min_y, max_x, max_y = bounds
-    
-    # Calculate center lat for approximation
     center_lat = (min_y + max_y) / 2
-    
-    # Approx degrees per meter
-    # Lat: 1 deg ~= 111320 m
-    # Lon: 1 deg ~= 111320 * cos(lat) m
     met_per_deg_lat = 111320
     met_per_deg_lon = 111320 * np.cos(np.radians(center_lat))
-    
-    # Width of map in meters
     width_deg = max_x - min_x
     width_met = width_deg * met_per_deg_lon
-    
-    # Target scale bar size: ~1/5 of map width
     target_len_met = width_met / 5
-    
-    # Round to nice number
     order = 10 ** np.floor(np.log10(target_len_met))
     nice_len_met = round(target_len_met / order) * order
-    
-    # Convert back to degrees for plotting
     nice_len_deg = nice_len_met / met_per_deg_lon
+    start_x = max_x - (width_deg * 0.05) - nice_len_deg
+    start_y = min_y + ((max_y - min_y) * 0.05)
     
-    # Position: Bottom right corner, with padding
-    pad_x = width_deg * 0.05
-    pad_y = (max_y - min_y) * 0.05
-    
-    start_x = max_x - pad_x - nice_len_deg
-    start_y = min_y + pad_y
-    
-    # Draw line (white background bar for visibility)
-    # rect_bg = mpatches.Rectangle((start_x - nice_len_deg*0.1, start_y - (max_y-min_y)*0.02), 
-    #                              nice_len_deg * 1.2, (max_y-min_y)*0.06, 
-    #                              linewidth=0, facecolor='black', alpha=0.5)
-    # ax.add_patch(rect_bg)
-    
-    # Draw scale bar
     rect = mpatches.Rectangle((start_x, start_y), nice_len_deg, (max_y-min_y)*0.008, 
                               linewidth=1, edgecolor='white', facecolor='white')
     ax.add_patch(rect)
     
-    # Add text
     label = f"{int(nice_len_met/1000)} km" if nice_len_met >= 1000 else f"{int(nice_len_met)} m"
     ax.text(start_x + nice_len_deg/2, start_y + (max_y-min_y)*0.02, label, 
             color='white', ha='center', va='bottom', fontsize=10, fontweight='bold',
@@ -314,7 +289,6 @@ def add_scale_bar(ax, bounds):
 
 
 def generate_static_map_display(image, roi, vis_params, title, cmap_colors=None, is_categorical=False, class_names=None):
-    # Fetch image with CRS 4326 to match Lat/Lon extent
     thumb_url = image.getThumbURL({
         'min': vis_params['min'], 'max': vis_params['max'],
         'palette': vis_params['palette'], 'region': roi,
@@ -324,7 +298,6 @@ def generate_static_map_display(image, roi, vis_params, title, cmap_colors=None,
     response = requests.get(thumb_url)
     img_pil = Image.open(BytesIO(response.content))
     
-    # Calculate Extent for Lat/Lon Grid
     bounds_poly = roi.bounds().getInfo()['coordinates'][0]
     lons = [p[0] for p in bounds_poly]
     lats = [p[1] for p in bounds_poly]
@@ -333,32 +306,24 @@ def generate_static_map_display(image, roi, vis_params, title, cmap_colors=None,
     fig, ax = plt.subplots(figsize=(10, 10), dpi=600, facecolor='#050509')
     ax.set_facecolor('#050509')
     
-    # Plot Image with geographic extent
     im = ax.imshow(img_pil, extent=extent, aspect='auto')
-    
-    # TITLE
     ax.set_title(title, fontsize=16, fontweight='bold', pad=20, color='#00f2ff')
-    
-    # LAT/LONG GRID & TICKS
     ax.tick_params(colors='white', labelcolor='white', labelsize=8)
     ax.grid(color='white', linestyle='--', linewidth=0.5, alpha=0.2)
     for spine in ax.spines.values():
         spine.set_edgecolor('white')
         spine.set_alpha(0.3)
     
-    # SCALE BAR
     try:
         add_scale_bar(ax, extent)
     except Exception as e:
         print(f"Scale bar error: {e}")
 
-    # LEGEND / COLORBAR
     if is_categorical and class_names and 'palette' in vis_params:
         patches = []
         for name, color in zip(class_names, vis_params['palette']):
             patches.append(mpatches.Patch(color=color, label=name))
         
-        # Place legend outside or neatly inside
         legend = ax.legend(handles=patches, loc='upper center', bbox_to_anchor=(0.5, -0.05), 
                            frameon=False, title="Classes", ncol=3)
         plt.setp(legend.get_title(), color='white', fontweight='bold')
@@ -366,12 +331,11 @@ def generate_static_map_display(image, roi, vis_params, title, cmap_colors=None,
             text.set_color("white")
             
     elif cmap_colors:
-        # Continuous Colorbar
         cmap = mcolors.LinearSegmentedColormap.from_list("custom", cmap_colors)
         norm = mcolors.Normalize(vmin=vis_params['min'], vmax=vis_params['max'])
         sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
         sm.set_array([])
-        cax = fig.add_axes([0.92, 0.15, 0.03, 0.7]) # [left, bottom, width, height]
+        cax = fig.add_axes([0.92, 0.15, 0.03, 0.7]) 
         cbar = plt.colorbar(sm, cax=cax)
         cbar.ax.yaxis.set_tick_params(color='white')
         cbar.set_label('Value', color='white')
@@ -393,7 +357,9 @@ with st.sidebar:
     """, unsafe_allow_html=True)
     
     # MODE SELECTOR
-    mode = st.radio("System Mode", ["Spectral Monitor", "LULC Classifier", "Geospatial-embeddings-use-cases"], index=0)
+    mode = st.radio("System Mode", 
+                    ["Spectral Monitor", "LULC Classifier", "Landslide Susceptibility", "Geospatial-embeddings-use-cases"], 
+                    index=0)
     st.session_state['mode'] = mode
 
     st.markdown("---")
@@ -437,6 +403,7 @@ with st.sidebar:
     model_choice = "Random Forest"
     embedding_year = 2023
     embedding_task = "LULC (ESA Labels)"
+    w_slope, w_rain, w_ndvi = 0.5, 0.3, 0.2 # LSM Defaults
 
     if mode == "Spectral Monitor":
         st.markdown("### 2. Sensor Config")
@@ -539,13 +506,24 @@ with st.sidebar:
             st.caption("Standard GEE classifiers.")
             cloud = st.slider("Cloud Masking %", 0, 30, 20)
             split_ratio = st.slider("Train/Validation Split", 0.5, 0.9, 0.8)
+    
+    elif mode == "Landslide Susceptibility":
+        st.markdown("### 2. Risk Factors")
+        st.info("Weighted Linear Combination (WLC) Model")
+        
+        w_slope = st.slider("Topography Weight (Slope)", 0.0, 1.0, 0.5, 0.1)
+        w_rain = st.slider("Trigger Weight (Rainfall)", 0.0, 1.0, 0.3, 0.1)
+        w_ndvi = st.slider("Land Cover Weight (Vegetation Inv)", 0.0, 1.0, 0.2, 0.1)
+        
+        st.caption(f"Total Weight: {round(w_slope + w_rain + w_ndvi, 1)}")
+        cloud = 10 # Default for background S2
 
     elif mode == "Geospatial-embeddings-use-cases":
         st.markdown("### 2. AI Embeddings Task")
         embedding_task = st.selectbox("Select Task", ["LULC (Supervised with ESA Labels)", "Water/Change Detection (Unsupervised)"])
         embedding_year = st.slider("Target Year", 2017, 2024, 2023)
         st.caption(f"Using Google Satellite Embeddings (V1) for {embedding_year}")
-        cloud = 0 # Embeddings don't use this directly in the same way
+        cloud = 0 
 
     if mode != "Geospatial-embeddings-use-cases":
         st.markdown("---")
@@ -587,6 +565,9 @@ with st.sidebar:
                     'platform': platform, 'idx': idx, 'formula': formula, 
                     'orbit': orbit, 'vmin': vmin, 'vmax': vmax, 'palette': cur_palette
                 })
+            
+            if mode == "Landslide Susceptibility":
+                params.update({'w_slope': w_slope, 'w_rain': w_rain, 'w_ndvi': w_ndvi})
                 
             st.session_state.update(params)
             st.session_state['dates'] = [] 
@@ -740,7 +721,6 @@ else:
                     st.stop()
                     
                 # Create Composite (Mode of labels)
-                # The 'label' band contains the class index with highest probability
                 dw_image = dw_col.select('label').mode().clip(roi)
                 
                 # DW Specific Visualization
@@ -838,8 +818,6 @@ else:
                         
                         proxy_name = "Visual Proxy (Random Forest)"
                         # Train proxy for map
-                        features = [ee.Feature(None, {k: row[k] for k in input_bands + ['class_val']}) for i, row in df.iterrows()]
-                        # Fix for Feature creation
                         features = []
                         for i, row in df.iterrows():
                              features.append(ee.Feature(None, {
@@ -933,7 +911,113 @@ else:
             m.to_streamlit()
 
     # ==========================================
-    # MODE 3: GEOSPATIAL EMBEDDINGS USE CASES
+    # MODE 3: LANDSLIDE SUSCEPTIBILITY (NEW)
+    # ==========================================
+    elif p['mode'] == "Landslide Susceptibility":
+        col_map, col_res = st.columns([3, 1])
+        m = geemap.Map(height=700, basemap="HYBRID")
+        m.centerObject(roi, 12)
+
+        with st.spinner("⛰️ Computing Weighted Hazard Overlay..."):
+            
+            # 1. SLOPE (Topography) - NASA NASADEM
+            dem = ee.Image("NASA/NASADEM_HGT/001").select('elevation')
+            slope = ee.Terrain.slope(dem).clip(roi)
+            # Normalize Slope: 0 to 45 degrees
+            slope_norm = slope.unitScale(0, 45).clamp(0, 1)
+
+            # 2. RAINFALL (Trigger) - CHIRPS
+            rain_col = ee.ImageCollection("UCSB-CHIRPS/PENTAD") \
+                .filterDate(p['start'], p['end']) \
+                .filterBounds(roi)
+            
+            if rain_col.size().getInfo() > 0:
+                rain_mean = rain_col.mean().clip(roi)
+                # Normalize Rainfall: 0 to 20mm/day avg
+                rain_norm = rain_mean.unitScale(0, 20).clamp(0, 1)
+            else:
+                rain_norm = ee.Image(0).clip(roi)
+                st.warning("⚠️ No CHIRPS rainfall data found for dates. Using 0 for rain factor.")
+
+            # 3. VEGETATION (Land Cover Stability) - Sentinel-2
+            s2 = (ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
+                  .filterBounds(roi)
+                  .filterDate(p['start'], p['end'])
+                  .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", 30))
+                  .map(mask_s2_clouds))
+            
+            if s2.size().getInfo() > 0:
+                s2_img = s2.median().clip(roi)
+                ndvi = s2_img.normalizedDifference(['B8', 'B4'])
+                # Normalize NDVI: 0 to 0.8. 
+                # INVERSE: High Veg = Low Risk.
+                ndvi_val = ndvi.unitScale(-0.1, 0.8).clamp(0, 1)
+                ndvi_risk = ee.Image(1).subtract(ndvi_val)
+            else:
+                ndvi_risk = ee.Image(0.5).clip(roi) # Fallback medium risk
+                st.warning("⚠️ No Sentinel-2 data. Using constant 0.5 for veg factor.")
+
+            # 4. COMPUTE WEIGHTED OVERLAY
+            w_s, w_r, w_v = p['w_slope'], p['w_rain'], p['w_ndvi']
+            
+            # Formula: Sum(Factor * Weight)
+            susceptibility = slope_norm.multiply(w_s) \
+                .add(rain_norm.multiply(w_r)) \
+                .add(ndvi_risk.multiply(w_v))
+
+            # Visualization
+            vis_lsm = {
+                'min': 0, 
+                'max': 0.8, 
+                'palette': ['#006400', '#32CD32', '#FFFF00', '#FFA500', '#FF0000', '#8B0000'] 
+                # DarkGreen (Safe) -> Yellow -> Orange -> Red -> DarkRed (Danger)
+            }
+
+            # Layers
+            m.addLayer(slope_norm, {'min':0, 'max':1, 'palette':['white','black']}, "Factor: Slope", False)
+            m.addLayer(rain_norm, {'min':0, 'max':1, 'palette':['white','blue']}, "Factor: Rain", False)
+            m.addLayer(ndvi_risk, {'min':0, 'max':1, 'palette':['green','white']}, "Factor: Veg (Inv)", False)
+            m.addLayer(susceptibility, vis_lsm, "Landslide Susceptibility Index")
+            m.add_colorbar(vis_lsm, label="Susceptibility Index", layer_name="Risk")
+
+            # --- HUD & EXPORT ---
+            with col_res:
+                st.markdown('<div class="glass-card">', unsafe_allow_html=True)
+                st.markdown('<div class="card-label">⚠️ RISK FACTORS</div>', unsafe_allow_html=True)
+                
+                c1, c2, c3 = st.columns(3)
+                c1.metric("Slope", f"{int(w_s*100)}%")
+                c2.metric("Rain", f"{int(w_r*100)}%")
+                c3.metric("Veg", f"{int(w_v*100)}%")
+                
+                st.markdown("---")
+                st.info("High Index = High Probability of Landslide")
+                
+                st.markdown("---")
+                if st.button("☁️ Export Hazard Map"):
+                    ee.batch.Export.image.toDrive(
+                        image=susceptibility, 
+                        description=f"LSM_Risk_{datetime.now().strftime('%Y%m%d')}", 
+                        scale=30, region=roi, folder='GEE_Exports'
+                    ).start()
+                    st.toast("Risk Map Export Started")
+
+                st.markdown("---")
+                if st.button("📷 Render Map (JPG)"):
+                    with st.spinner("Generating Map..."):
+                        buf = generate_static_map_display(
+                            susceptibility, roi, vis_lsm, "Landslide Susceptibility", 
+                            cmap_colors=vis_lsm['palette']
+                        )
+                        st.download_button("⬇️ Save Image", buf, "Ni30_LSM_Risk.jpg", "image/jpeg", use_container_width=True)
+
+                st.markdown('</div>', unsafe_allow_html=True)
+
+        with col_map:
+            m.to_streamlit()
+
+    # ==========================================
+    # MODE 4: GEOSPATIAL EMBEDDINGS USE CASES
     # ==========================================
     elif p['mode'] == "Geospatial-embeddings-use-cases":
         col_map, col_res = st.columns([3, 1])
@@ -1031,7 +1115,7 @@ else:
                                 scale=20, region=roi, folder='GEE_Exports'
                             ).start()
                             st.toast("Export task started")
-                         
+                          
                          st.markdown("---")
                          if st.button("📷 Render Map (JPG)"):
                              with st.spinner("Generating Map..."):
@@ -1076,11 +1160,10 @@ else:
                              with st.spinner("Generating Map..."):
                                  buf = generate_static_map_display(
                                      result, roi, cluster_vis, f"Clusters | {target_year}", 
-                                     is_categorical=False # Clusters are cat, but random colors make legend hard
+                                     is_categorical=False 
                                  )
                                  st.download_button("⬇️ Save Image", buf, "Ni30_Clusters.jpg", "image/jpeg", use_container_width=True)
                     st.markdown('</div>', unsafe_allow_html=True)
 
         with col_map:
             m.to_streamlit()
-
