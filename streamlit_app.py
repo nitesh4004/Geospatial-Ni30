@@ -915,50 +915,53 @@ else:
             # 1. SLOPE (SRTM)
             dem = ee.Image('USGS/SRTMGL1_003').clip(roi)
             slope = ee.Terrain.slope(dem)
-            # Normalize Slope: 0-45 deg mapped to 0-1
             slope_norm = slope.divide(45).clamp(0, 1)
 
-            # 2. VEGETATION (Sentinel-2 NDVI)
-            # Inverse: Low NDVI = High Risk (Bare soil, loose ground)
-            s2 = ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED") \
+            # 2. VEGETATION & WATER (Sentinel-2)
+            # Use safety check for empty S2 collection (cloudy/small roi)
+            s2_col = ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED") \
                 .filterBounds(roi).filterDate(p['start'], p['end']) \
-                .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 20)) \
-                .median().clip(roi)
+                .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 20))
             
-            if s2:
-                ndvi = s2.normalizedDifference(['B8', 'B4'])
-                # NDVI is -1 to 1. We want Low NDVI to be 1 (Risk) and High to be 0.
-                # Approx mapping: 0.8 (dense forest) -> 0 risk. 0.0 (bare) -> 1 risk.
-                veg_risk = ee.Image(1).subtract(ndvi).clamp(0, 1)
+            # Default risk if no S2 data (0.5 moderate)
+            veg_risk = ee.Image.constant(0.5).clip(roi)
+            water_risk = ee.Image.constant(0.5).clip(roi)
 
-                # 3. MOISTURE (Sentinel-2 NDWI)
-                # NDWI (Green-NIR) / (Green+NIR). Water bodies are high. Wet soil is high.
-                # High moisture = higher slip risk.
-                ndwi = s2.normalizedDifference(['B3', 'B8'])
-                # Map -0.5 to 0.5 -> 0 to 1
-                water_risk = ndwi.add(0.5).clamp(0, 1)
+            if s2_col.size().getInfo() > 0:
+                s2 = s2_col.median().clip(roi)
+                # Check if image has bands
+                if len(s2.bandNames().getInfo()) > 0:
+                    # Low NDVI = High Risk (1.0)
+                    ndvi = s2.normalizedDifference(['B8', 'B4'])
+                    veg_risk = ee.Image(1).subtract(ndvi).clamp(0, 1)
+                    
+                    # High NDWI = High Risk (1.0)
+                    ndwi = s2.normalizedDifference(['B3', 'B8'])
+                    water_risk = ndwi.add(0.5).clamp(0, 1)
             else:
-                veg_risk = ee.Image(0.5)
-                water_risk = ee.Image(0.5)
+                st.warning("⚠️ No clear Sentinel-2 data found. Using default vegetation/moisture risk.")
 
-            # 4. RAINFALL (CHIRPS)
-            # 5-day precipitation aggregate
-            rain = ee.ImageCollection("UCSB-CHIRPS/PENTAD") \
-                .filterBounds(roi).filterDate(p['start'], p['end']) \
-                .mean().clip(roi)
+            # 3. RAINFALL (CHIRPS)
+            # CHIRPS has lag. Check if data exists.
+            rain_col = ee.ImageCollection("UCSB-CHIRPS/PENTAD") \
+                .filterBounds(roi).filterDate(p['start'], p['end'])
             
-            # Heuristic normalization for rain (0 to 50mm)
-            rain_norm = rain.divide(50).clamp(0, 1)
+            rain_norm = ee.Image.constant(0).clip(roi) # Default to 0 rain if missing
+            
+            if rain_col.size().getInfo() > 0:
+                rain = rain_col.mean().clip(roi)
+                rain_norm = rain.divide(50).clamp(0, 1)
+            else:
+                st.warning("⚠️ No Rainfall data found for date range (CHIRPS latency). Using 0 rainfall risk.")
 
-            # 5. WEIGHTED OVERLAY
-            # Formula: Sum(Factor * Weight)
-            lsm_index = (slope_norm.multiply(p['w_slope'])) \
-                        .add(rain_norm.multiply(p['w_rain'])) \
-                        .add(veg_risk.multiply(p['w_veg'])) \
-                        .add(water_risk.multiply(p['w_water']))
+            # 4. WEIGHTED OVERLAY
+            # Ensure all are float
+            lsm_index = (slope_norm.toFloat().multiply(p['w_slope'])) \
+                        .add(rain_norm.toFloat().multiply(p['w_rain'])) \
+                        .add(veg_risk.toFloat().multiply(p['w_veg'])) \
+                        .add(water_risk.toFloat().multiply(p['w_water']))
 
             # Visualization
-            # Green (Safe) -> Yellow (Moderate) -> Red (Danger)
             lsm_vis = {
                 'min': 0.2, 
                 'max': 0.7, 
@@ -972,15 +975,17 @@ else:
                 st.markdown('<div class="glass-card">', unsafe_allow_html=True)
                 st.markdown('<div class="card-label">⚠️ RISK PROFILE</div>', unsafe_allow_html=True)
                 
-                # Calculate simple stats using reduceRegion (can be slow on large ROIs, use cautiously)
                 try:
                     stats = lsm_index.reduceRegion(
                         reducer=ee.Reducer.mean(),
                         geometry=roi,
-                        scale=100, # coarse scale for speed
+                        scale=100, 
                         maxPixels=1e9
                     ).getInfo()
-                    avg_risk = stats.get('slope', 0) # Band name usually takes first component name
+                    # Band name usually defaults to 'slope' from the first band added
+                    # or we can get values()
+                    val_list = list(stats.values())
+                    avg_risk = val_list[0] if val_list else 0
                     
                     st.metric("Avg Risk Index", f"{avg_risk:.2f}")
                     
