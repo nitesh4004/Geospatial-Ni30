@@ -258,31 +258,57 @@ def add_lulc_indices(image):
     
     return image.addBands([ndvi, evi, gndvi, ndwi, ndmi])
 
-# --- MAPPING UTILS ---
 def add_scale_bar(ax, bounds):
+    """
+    Adds a scale bar to the matplotlib axes based on bounding box coordinates (WGS84).
+    bounds: [min_lon, min_lat, max_lon, max_lat]
+    """
     min_x, min_y, max_x, max_y = bounds
+    
+    # Calculate center lat for approximation
     center_lat = (min_y + max_y) / 2
+    
+    # Approx degrees per meter
+    # Lat: 1 deg ~= 111320 m
+    # Lon: 1 deg ~= 111320 * cos(lat) m
     met_per_deg_lat = 111320
     met_per_deg_lon = 111320 * np.cos(np.radians(center_lat))
+    
+    # Width of map in meters
     width_deg = max_x - min_x
     width_met = width_deg * met_per_deg_lon
+    
+    # Target scale bar size: ~1/5 of map width
     target_len_met = width_met / 5
+    
+    # Round to nice number
     order = 10 ** np.floor(np.log10(target_len_met))
     nice_len_met = round(target_len_met / order) * order
+    
+    # Convert back to degrees for plotting
     nice_len_deg = nice_len_met / met_per_deg_lon
+    
+    # Position: Bottom right corner, with padding
     pad_x = width_deg * 0.05
     pad_y = (max_y - min_y) * 0.05
+    
     start_x = max_x - pad_x - nice_len_deg
     start_y = min_y + pad_y
+    
+    # Draw scale bar
     rect = mpatches.Rectangle((start_x, start_y), nice_len_deg, (max_y-min_y)*0.008, 
                               linewidth=1, edgecolor='white', facecolor='white')
     ax.add_patch(rect)
+    
+    # Add text
     label = f"{int(nice_len_met/1000)} km" if nice_len_met >= 1000 else f"{int(nice_len_met)} m"
     ax.text(start_x + nice_len_deg/2, start_y + (max_y-min_y)*0.02, label, 
             color='white', ha='center', va='bottom', fontsize=10, fontweight='bold',
             path_effects=[plt.matplotlib.patheffects.withStroke(linewidth=2, foreground="black")])
 
+
 def generate_static_map_display(image, roi, vis_params, title, cmap_colors=None, is_categorical=False, class_names=None):
+    # Fetch image with CRS 4326 to match Lat/Lon extent
     thumb_url = image.getThumbURL({
         'min': vis_params['min'], 'max': vis_params['max'],
         'palette': vis_params['palette'], 'region': roi,
@@ -291,6 +317,8 @@ def generate_static_map_display(image, roi, vis_params, title, cmap_colors=None,
     })
     response = requests.get(thumb_url)
     img_pil = Image.open(BytesIO(response.content))
+    
+    # Calculate Extent for Lat/Lon Grid
     bounds_poly = roi.bounds().getInfo()['coordinates'][0]
     lons = [p[0] for p in bounds_poly]
     lats = [p[1] for p in bounds_poly]
@@ -298,22 +326,33 @@ def generate_static_map_display(image, roi, vis_params, title, cmap_colors=None,
     
     fig, ax = plt.subplots(figsize=(10, 10), dpi=600, facecolor='#050509')
     ax.set_facecolor('#050509')
+    
+    # Plot Image with geographic extent
     im = ax.imshow(img_pil, extent=extent, aspect='auto')
+    
+    # TITLE
     ax.set_title(title, fontsize=16, fontweight='bold', pad=20, color='#00f2ff')
+    
+    # LAT/LONG GRID & TICKS
     ax.tick_params(colors='white', labelcolor='white', labelsize=8)
     ax.grid(color='white', linestyle='--', linewidth=0.5, alpha=0.2)
     for spine in ax.spines.values():
         spine.set_edgecolor('white')
         spine.set_alpha(0.3)
+    
+    # SCALE BAR
     try:
         add_scale_bar(ax, extent)
     except Exception as e:
         print(f"Scale bar error: {e}")
 
+    # LEGEND / COLORBAR
     if is_categorical and class_names and 'palette' in vis_params:
         patches = []
         for name, color in zip(class_names, vis_params['palette']):
             patches.append(mpatches.Patch(color=color, label=name))
+        
+        # Place legend outside or neatly inside
         legend = ax.legend(handles=patches, loc='upper center', bbox_to_anchor=(0.5, -0.05), 
                            frameon=False, title="Classes", ncol=3)
         plt.setp(legend.get_title(), color='white', fontweight='bold')
@@ -321,11 +360,12 @@ def generate_static_map_display(image, roi, vis_params, title, cmap_colors=None,
             text.set_color("white")
             
     elif cmap_colors:
+        # Continuous Colorbar
         cmap = mcolors.LinearSegmentedColormap.from_list("custom", cmap_colors)
         norm = mcolors.Normalize(vmin=vis_params['min'], vmax=vis_params['max'])
         sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
         sm.set_array([])
-        cax = fig.add_axes([0.92, 0.15, 0.03, 0.7])
+        cax = fig.add_axes([0.92, 0.15, 0.03, 0.7]) # [left, bottom, width, height]
         cbar = plt.colorbar(sm, cax=cax)
         cbar.ax.yaxis.set_tick_params(color='white')
         cbar.set_label('Value', color='white')
@@ -347,7 +387,7 @@ with st.sidebar:
     """, unsafe_allow_html=True)
     
     # MODE SELECTOR
-    mode = st.radio("System Mode", ["Spectral Monitor", "LULC Classifier", "SAR Landslide Detection", "Geospatial-embeddings-use-cases"], index=0)
+    mode = st.radio("System Mode", ["Spectral Monitor", "LULC Classifier", "Geospatial-embeddings-use-cases", "Landslide Detection (SAR)"], index=0)
     st.session_state['mode'] = mode
 
     st.markdown("---")
@@ -391,11 +431,8 @@ with st.sidebar:
     model_choice = "Random Forest"
     embedding_year = 2023
     embedding_task = "LULC (ESA Labels)"
-    
-    # SAR Vars
-    sar_year_1 = 2019
-    sar_year_2 = 2020
-    sar_threshold = -2.0
+    pre_start, pre_end, post_start, post_end = None, None, None, None
+    slide_thresh, slope_thresh = 2.0, 15
 
     if mode == "Spectral Monitor":
         st.markdown("### 2. Sensor Config")
@@ -499,18 +536,6 @@ with st.sidebar:
             cloud = st.slider("Cloud Masking %", 0, 30, 20)
             split_ratio = st.slider("Train/Validation Split", 0.5, 0.9, 0.8)
 
-    elif mode == "SAR Landslide Detection":
-        st.markdown("### 2. Detection Parameters")
-        st.info("Detects backscatter loss between two years (default: Almora Event 2019 vs 2020).")
-        
-        c1, c2 = st.columns(2)
-        sar_year_1 = c1.number_input("Pre-Event Year", 2015, 2024, 2019)
-        sar_year_2 = c2.number_input("Post-Event Year", 2015, 2024, 2020)
-        
-        sar_threshold = st.slider("Backscatter Drop Threshold (dB)", -10.0, -1.0, -2.0, 0.5)
-        st.caption("Areas where signal drops below this value are flagged as potential landslides.")
-        cloud = 0
-
     elif mode == "Geospatial-embeddings-use-cases":
         st.markdown("### 2. AI Embeddings Task")
         embedding_task = st.selectbox("Select Task", ["LULC (Supervised with ESA Labels)", "Water/Change Detection (Unsupervised)"])
@@ -518,12 +543,35 @@ with st.sidebar:
         st.caption(f"Using Google Satellite Embeddings (V1) for {embedding_year}")
         cloud = 0 # Embeddings don't use this directly in the same way
 
-    if mode != "Geospatial-embeddings-use-cases":
+    elif mode == "Landslide Detection (SAR)":
+        st.markdown("### 2. Event Configuration")
+        st.caption("Using Sentinel-1 (Radar) Change Detection")
+        
+        st.markdown("#### Pre-Event Baseline")
+        c1, c2 = st.columns(2)
+        pre_start = c1.date_input("From", datetime.now()-timedelta(90), key="pre_s")
+        pre_end = c2.date_input("To", datetime.now()-timedelta(30), key="pre_e")
+        
+        st.markdown("#### Post-Event Analysis")
+        c3, c4 = st.columns(2)
+        post_start = c3.date_input("From", datetime.now()-timedelta(29), key="post_s")
+        post_end = c4.date_input("To", datetime.now(), key="post_e")
+
+        st.markdown("#### Detection sensitivity")
+        slide_thresh = st.slider("Backscatter Change (dB)", 1.0, 5.0, 2.5, 0.1, help="Higher value = Stricter detection (less noise)")
+        slope_thresh = st.slider("Min Slope (Degrees)", 0, 30, 15, help="Exclude flat areas (agri fields)")
+        cloud = 0
+
+    # Common Temporal Window (Only for non-SAR/Embeddings modes)
+    if mode not in ["Geospatial-embeddings-use-cases", "Landslide Detection (SAR)"]:
         st.markdown("---")
         st.markdown("### 3. Temporal Window")
         c1, c2 = st.columns(2)
         start = c1.date_input("Start", datetime.now()-timedelta(60))
         end = c2.date_input("End", datetime.now())
+    else:
+        # Dummy vars for consistency
+        start, end = datetime.now(), datetime.now()
 
     st.markdown("###")
     if st.button("INITIALIZE SCAN 🚀"):
@@ -539,7 +587,16 @@ with st.sidebar:
                 'split_ratio': split_ratio if 'split_ratio' in locals() else 0.8
             }
             
-            if mode != "Geospatial-embeddings-use-cases":
+            if mode == "Landslide Detection (SAR)":
+                params.update({
+                    'pre_start': pre_start.strftime("%Y-%m-%d"),
+                    'pre_end': pre_end.strftime("%Y-%m-%d"),
+                    'post_start': post_start.strftime("%Y-%m-%d"),
+                    'post_end': post_end.strftime("%Y-%m-%d"),
+                    'slide_thresh': slide_thresh,
+                    'slope_thresh': slope_thresh
+                })
+            elif mode != "Geospatial-embeddings-use-cases":
                 params.update({
                     'start': start.strftime("%Y-%m-%d"), 
                     'end': end.strftime("%Y-%m-%d")
@@ -557,11 +614,6 @@ with st.sidebar:
                 params.update({
                     'platform': platform, 'idx': idx, 'formula': formula, 
                     'orbit': orbit, 'vmin': vmin, 'vmax': vmax, 'palette': cur_palette
-                })
-            
-            if mode == "SAR Landslide Detection":
-                params.update({
-                    'sar_year_1': sar_year_1, 'sar_year_2': sar_year_2, 'sar_threshold': sar_threshold
                 })
                 
             st.session_state.update(params)
@@ -814,6 +866,8 @@ else:
                         
                         proxy_name = "Visual Proxy (Random Forest)"
                         # Train proxy for map
+                        features = [ee.Feature(None, {k: row[k] for k in input_bands + ['class_val']}) for i, row in df.iterrows()]
+                        # Fix for Feature creation
                         features = []
                         for i, row in df.iterrows():
                              features.append(ee.Feature(None, {
@@ -905,113 +959,9 @@ else:
 
         with col_map:
             m.to_streamlit()
-    
-    # ==========================================
-    # MODE 3: SAR LANDSLIDE DETECTION
-    # ==========================================
-    elif p['mode'] == "SAR Landslide Detection":
-        col_map, col_res = st.columns([3, 1])
-        m = geemap.Map(height=700, basemap="HYBRID")
-        m.centerObject(roi, 13)
-
-        with st.spinner("📡 Processing Sentinel-1 SAR Backscatter Change..."):
-            
-            def get_s1_collection(roi, start, end):
-                return (ee.ImageCollection('COPERNICUS/S1_GRD')
-                    .filterBounds(roi)
-                    .filterDate(start, end)
-                    .filter(ee.Filter.eq('instrumentMode', 'IW'))
-                    .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VV'))
-                    .select('VV'))
-
-            def yearly_sar_mean(roi, year):
-                start = ee.Date.fromYMD(year, 1, 1)
-                end = start.advance(1, 'year')
-                return get_s1_collection(roi, start, end).mean().set('year', year)
-
-            # 1. Generate Yearly Means
-            try:
-                first_year_img = yearly_sar_mean(roi, p['sar_year_1'])
-                last_year_img = yearly_sar_mean(roi, p['sar_year_2'])
-                
-                # 2. Compute Change
-                backscatter_change = last_year_img.subtract(first_year_img).rename('Change')
-                
-                # 3. Apply Threshold (Landslide Mask)
-                # Areas with strong decrease in backscatter (e.g., < -2 dB)
-                landslide_mask = backscatter_change.lt(p['sar_threshold'])
-                landslide_zones = landslide_mask.updateMask(landslide_mask) # Transparency
-                
-                # 4. Visualization Params
-                sar_vis = {'min': -25, 'max': 0, 'palette': ['blue', 'white', 'green']}
-                change_vis = {'min': -5, 'max': 5, 'palette': ['red', 'white', 'blue']}
-                slide_vis = {'palette': ['yellow']}
-                
-                # 5. Add Layers
-                m.addLayer(first_year_img.clip(roi), sar_vis, f'SAR VV ({p["sar_year_1"]})', False)
-                m.addLayer(last_year_img.clip(roi), sar_vis, f'SAR VV ({p["sar_year_2"]})', False)
-                m.addLayer(backscatter_change.clip(roi), change_vis, 'Backscatter Change')
-                m.addLayer(landslide_zones.clip(roi), slide_vis, 'Potential Landslide Zones')
-                
-                # --- RESULTS PANE ---
-                with col_res:
-                    st.markdown('<div class="glass-card">', unsafe_allow_html=True)
-                    st.markdown('<div class="card-label">⛰️ LANDSLIDE STATS</div>', unsafe_allow_html=True)
-                    
-                    # 6. Area Calculation
-                    try:
-                        area_img = landslide_mask.multiply(ee.Image.pixelArea().divide(1e6)) # km2
-                        
-                        stats = area_img.reduceRegion(
-                            reducer=ee.Reducer.sum(),
-                            geometry=roi,
-                            scale=100, # Using coarser scale for instant UI stats (prevent timeout)
-                            maxPixels=1e9
-                        ).getInfo()
-                        
-                        total_area = list(stats.values())[0] if stats else 0
-                        
-                        st.metric("Detected Landslide Area", f"{total_area:.4f} km²")
-                        st.caption(f"Based on change < {p['sar_threshold']} dB")
-                        
-                    except Exception as e:
-                        st.warning("Area calculation timeout (Region too big).")
-
-                    st.markdown("---")
-                    st.markdown(f"**Comparison:** {p['sar_year_1']} vs {p['sar_year_2']}")
-                    
-                    st.markdown("---")
-                    if st.button("☁️ Export Landslide Map"):
-                        ee.batch.Export.image.toDrive(
-                            image=landslide_zones.clip(roi), 
-                            description=f"Landslide_Zones_{p['sar_year_1']}_{p['sar_year_2']}", 
-                            region=roi,
-                            scale=10, 
-                            crs='EPSG:4326',
-                            folder='GEE_Landslides'
-                        ).start()
-                        st.toast("Export Started to Drive")
-                    
-                    st.markdown("---")
-                    if st.button("📷 Render Map (JPG)"):
-                         with st.spinner("Generating Map..."):
-                            # Overlay landslides (yellow) on SAR
-                            buf = generate_static_map_display(
-                                landslide_zones, roi, slide_vis, f"Landslide Detection | {p['sar_year_1']}-{p['sar_year_2']}", 
-                                is_categorical=True, class_names=['Landslide']
-                            )
-                            st.download_button("⬇️ Save Image", buf, "Ni30_Landslides.jpg", "image/jpeg", use_container_width=True)
-
-                    st.markdown('</div>', unsafe_allow_html=True)
-
-            except Exception as e:
-                st.error(f"Processing Error: {e}. Check if SAR data exists for these years.")
-
-        with col_map:
-            m.to_streamlit()
 
     # ==========================================
-    # MODE 4: GEOSPATIAL EMBEDDINGS USE CASES
+    # MODE 3: GEOSPATIAL EMBEDDINGS USE CASES
     # ==========================================
     elif p['mode'] == "Geospatial-embeddings-use-cases":
         col_map, col_res = st.columns([3, 1])
@@ -1158,6 +1108,122 @@ else:
                                  )
                                  st.download_button("⬇️ Save Image", buf, "Ni30_Clusters.jpg", "image/jpeg", use_container_width=True)
                     st.markdown('</div>', unsafe_allow_html=True)
+
+        with col_map:
+            m.to_streamlit()
+    
+    # ==========================================
+    # MODE 4: LANDSLIDE DETECTION (SAR)
+    # ==========================================
+    elif p['mode'] == "Landslide Detection (SAR)":
+        col_map, col_res = st.columns([3, 1])
+        m = geemap.Map(height=700, basemap="HYBRID")
+        m.centerObject(roi, 13)
+        
+        with st.spinner("🛰️ Calculating SAR Backscatter Changes & DEM Analysis..."):
+            # 1. Get S1 Collections for Pre and Post
+            def get_s1_processed(start_d, end_d, roi_geom):
+                col = ee.ImageCollection('COPERNICUS/S1_GRD') \
+                    .filterDate(start_d, end_d) \
+                    .filterBounds(roi_geom) \
+                    .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VV')) \
+                    .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VH')) \
+                    .filter(ee.Filter.eq('instrumentMode', 'IW'))
+                
+                # Mosaic and Apply Speckle Filter (Boxcar)
+                # Using VV polarization as it's often more sensitive to surface roughness changes in landslides
+                img = col.select('VV').mosaic().clip(roi_geom)
+                return img.focal_median(50, 'circle', 'meters')
+
+            pre_img = get_s1_processed(p['pre_start'], p['pre_end'], roi)
+            post_img = get_s1_processed(p['post_start'], p['post_end'], roi)
+            
+            # Check if images exist
+            try:
+                # Force a check
+                info_check = pre_img.getInfo()
+            except:
+                st.error("No Sentinel-1 Imagery found for the selected Pre-Event dates.")
+                st.stop()
+
+            # 2. Calculate Difference (Log Ratio / dB Difference)
+            # Sentinel-1 GRD is often provided in linear scale by default in some GEE contexts, 
+            # but usually usually pre-processed to dB. If linear, log ratio. If dB, subtraction.
+            # Assuming standard GEE S1 GRD which is sigma0.
+            
+            # Convert to dB for consistent math: 10*log10(x)
+            pre_db = ee.Image(10).multiply(pre_img.log10())
+            post_db = ee.Image(10).multiply(post_img.log10())
+            
+            diff = post_db.subtract(pre_db).abs()
+            
+            # 3. Terrain Masking (Slope)
+            # Landslides typically occur on slopes > 10-15 degrees.
+            # Use NASA DEM (Global) or SRTM
+            dem = ee.Image('NASA/NASADEM_HGT/001').select('elevation')
+            slope = ee.Terrain.slope(dem).clip(roi)
+            
+            # Mask: Significant Change AND Significant Slope
+            # Landslides usually increase roughness (brighter) or remove veg (darker/brighter depending on moisture)
+            # We look for high absolute change.
+            slide_mask = diff.gt(p['slide_thresh']).And(slope.gt(p['slope_thresh']))
+            
+            detected_slides = diff.updateMask(slide_mask)
+            
+            # 4. Visualization
+            m.addLayer(pre_db, {'min': -25, 'max': 0}, 'Pre-Event (dB)', False)
+            m.addLayer(post_db, {'min': -25, 'max': 0}, 'Post-Event (dB)', False)
+            m.addLayer(slope, {'min': 0, 'max': 60, 'palette': ['white', 'black']}, 'Slope Map', False)
+            
+            slide_vis = {'palette': ['red']}
+            m.addLayer(detected_slides, slide_vis, '⚠️ Potential Landslides')
+            
+            # 5. Calculate Affected Area
+            area_img = ee.Image.pixelArea().updateMask(slide_mask)
+            stats = area_img.reduceRegion(
+                reducer=ee.Reducer.sum(),
+                geometry=roi,
+                scale=10,
+                maxPixels=1e9
+            )
+            area_sq_m = stats.get('area')
+            area_ha = ee.Number(area_sq_m).divide(10000).getInfo()
+
+            with col_res:
+                st.markdown('<div class="glass-card">', unsafe_allow_html=True)
+                st.markdown('<div class="card-label">⚠️ DETECTION REPORT</div>', unsafe_allow_html=True)
+                st.warning("Sentinel-1 Change Detection")
+                
+                if area_ha is not None:
+                    st.markdown(f"""
+                        <div style="margin: 15px 0;">
+                            <div class="metric-sub">Affected Area</div>
+                            <div class="metric-value" style="color:#ff4b4b;">{area_ha:.2f} ha</div>
+                        </div>
+                    """, unsafe_allow_html=True)
+                else:
+                    st.info("No significant changes detected above threshold.")
+
+                st.markdown(f"**Sensitivity:** {p['slide_thresh']} dB")
+                st.markdown(f"**Slope Mask:** > {p['slope_thresh']}°")
+                
+                st.markdown("---")
+                if st.button("☁️ Export Detection"):
+                     ee.batch.Export.image.toDrive(
+                        image=detected_slides, description=f"Landslide_Mask_{p['post_end']}", 
+                        scale=10, region=roi, folder='GEE_Exports'
+                    ).start()
+                     st.toast("Export started")
+                
+                st.markdown("---")
+                if st.button("📷 Save Map Report"):
+                     buf = generate_static_map_display(
+                         detected_slides, roi, {'min':0, 'max':1, 'palette':['red']}, 
+                         "Landslide Detection | S1 SAR", is_categorical=True, class_names=["Landslide"]
+                     )
+                     st.download_button("⬇️ Save Image", buf, "Ni30_Landslide.jpg", "image/jpeg", use_container_width=True)
+
+                st.markdown('</div>', unsafe_allow_html=True)
 
         with col_map:
             m.to_streamlit()
