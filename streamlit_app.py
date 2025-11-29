@@ -445,7 +445,7 @@ with st.sidebar:
     model_choice = "Random Forest"
     embedding_year = 2023
     embedding_task = "LULC (ESA Labels)"
-    w_slope, w_rain, w_ndvi = 0.5, 0.3, 0.2
+    w_slope, w_rain, w_lc, w_twi = 0.4, 0.2, 0.3, 0.1
 
     if mode == "Spectral Monitor":
         st.markdown("### 2. Sensor Config")
@@ -557,13 +557,16 @@ with st.sidebar:
         cloud = 0 # Embeddings don't use this directly in the same way
     
     elif mode == "Landslide Risk (LSM)":
-        st.markdown("### 2. Risk Factors")
-        st.info("Weighted Overlay Method")
-        w_slope = st.slider("Topography (Slope) Weight", 0.0, 1.0, 0.5)
-        w_rain = st.slider("Trigger (Rainfall) Weight", 0.0, 1.0, 0.3)
-        w_ndvi = st.slider("Land Cover (NDVI) Weight", 0.0, 1.0, 0.2)
-        st.caption("Higher weight = higher influence on risk model.")
-        cloud = st.slider("Cloud Tolerance (Vegetation)", 0, 30, 10)
+        st.markdown("### 2. Hazard Factors")
+        st.info("MCDA / Heuristic Method (TWI + Slope Class)")
+        
+        w_slope = st.slider("Topography (Slope)", 0.0, 1.0, 0.4, 0.1)
+        w_lc = st.slider("Land Cover (ESA Vulnerability)", 0.0, 1.0, 0.3, 0.1)
+        w_rain = st.slider("Trigger (Rainfall)", 0.0, 1.0, 0.2, 0.1)
+        w_twi = st.slider("Soil Saturation (TWI)", 0.0, 1.0, 0.1, 0.1)
+        
+        st.caption("Uses Discrete Risk Classes (1-5) for improved separation.")
+        cloud = 0 # Not used for ESA/Terrain
 
     if mode != "Geospatial-embeddings-use-cases":
         st.markdown("---")
@@ -590,7 +593,8 @@ with st.sidebar:
                  params.update({
                     'w_slope': w_slope,
                     'w_rain': w_rain,
-                    'w_ndvi': w_ndvi,
+                    'w_lc': w_lc,
+                    'w_twi': w_twi,
                     'start': start.strftime("%Y-%m-%d"), 
                     'end': end.strftime("%Y-%m-%d")
                  })
@@ -963,93 +967,97 @@ else:
         m = geemap.Map(height=700, basemap="HYBRID")
         m.centerObject(roi, 13)
         
-        with st.spinner("⛰️ Computing Weighted Overlay (Slope + Rain + Veg)..."):
+        with st.spinner("⛰️ Computing Improved Hazard Model (MCDA / TWI)..."):
             
-            # 1. SLOPE (Topography)
+            # 1. SLOPE (Topography) - Discrete Classes
             dem = ee.Image("NASA/NASADEM_HGT/001").select('elevation')
             slope = ee.Terrain.slope(dem).clip(roi)
-            slope_norm = slope.unitScale(0, 45) # Normalize 0-45 degrees
-            
-            # 2. RAINFALL (Trigger)
-            rain_norm = ee.Image(0).clip(roi) # Default safe value
+            # Reclassify Slope: <10(1), 10-20(2), 20-30(3), 30-40(4), >40(5)
+            slope_class = slope.expression(
+                "(b(0) < 10) ? 1 : (b(0) < 20) ? 2 : (b(0) < 30) ? 3 : (b(0) < 40) ? 4 : 5"
+            )
+            # Normalize to 0-1 for weighted sum (1/5=0.2, 5/5=1.0)
+            slope_norm = slope_class.divide(5)
+
+            # 2. HYDROLOGY (Topographic Wetness Index - TWI)
+            # TWI = ln(FlowAcc / tan(Slope))
+            # Identifies areas of flow convergence and saturation
+            flow_acc = ee.Image("WWF/HydroSHEDS/15ACC").clip(roi)
+            slope_rad = slope.multiply(3.14159/180) # deg to rad
+            twi = flow_acc.expression(
+                "log(b('b1') + 1) - log(tan(b('slope')) + 0.01)",
+                {'b1': flow_acc, 'slope': slope_rad}
+            ).rename('twi')
+            twi_norm = twi.unitScale(0, 15).clamp(0, 1)
+
+            # 3. LAND COVER VULNERABILITY (ESA WorldCover)
+            # Stable: Trees(10), Mangroves(95) -> Risk 2
+            # Medium: Shrub(20), Grass(30) -> Risk 3
+            # High: Crop(40), Bare(60) -> Risk 4/5
+            # Low: Built(50 - engineered), Snow(70), Water(80) -> Risk 1
+            esa = ee.Image("ESA/WorldCover/v200/2021").clip(roi)
+            lc_risk = esa.remap(
+                [10, 20, 30, 40, 50, 60, 70, 80, 90, 95, 100],
+                [2,  3,  3,  4,  1,  5,  1,  0,  1,  1,  1]  # Risk Score 1-5
+            )
+            lc_norm = lc_risk.divide(5)
+
+            # 4. RAINFALL TRIGGER (CHIRPS)
+            rain_norm = ee.Image(0).clip(roi)
             try:
                 rain_col = ee.ImageCollection("UCSB-CHIRPS/PENTAD") \
                     .filterDate(p['start'], p['end']) \
                     .filterBounds(roi)
                 
-                # Check for images safely without crashing (limit(1).size() is faster)
                 if rain_col.limit(1).size().getInfo() > 0:
                     rain_mean = rain_col.mean().clip(roi)
-                    rain_norm = rain_mean.unitScale(0, 20)
+                    rain_norm = rain_mean.unitScale(0, 20).clamp(0, 1)
                 else:
-                    st.warning("No Rainfall data found for date range/ROI. Trigger factor is 0.")
-            except Exception as e:
-                st.warning(f"Could not retrieve Rainfall data (API Error). Trigger factor is 0.")
+                    st.warning("Rainfall data unavailable for dates. Trigger factor ignored.")
+            except Exception:
+                st.warning("Rainfall API error. Trigger factor ignored.")
 
-            # 3. VEGETATION (Stabilizer)
-            ndvi_inv = ee.Image(0.5).clip(roi) # Default mid-risk
-            try:
-                l8 = ee.ImageCollection("LANDSAT/LC08/C02/T1_L2") \
-                    .filterDate(p['start'], p['end']) \
-                    .filterBounds(roi) \
-                    .filter(ee.Filter.lt('CLOUD_COVER', p['cloud']))
-                
-                if l8.limit(1).size().getInfo() > 0:
-                    l8_img = l8.median().clip(roi)
-                    nir = l8_img.select('SR_B5').multiply(0.0000275).add(-0.2)
-                    red = l8_img.select('SR_B4').multiply(0.0000275).add(-0.2)
-                    ndvi = nir.subtract(red).divide(nir.add(red)).rename('NDVI')
-                    ndvi_val = ndvi.unitScale(0, 0.8)
-                    ndvi_inv = ee.Image(1).subtract(ndvi_val)
-                else:
-                    st.warning("No clear Optical data. Vegetation factor set to 0.5.")
-            except Exception as e:
-                st.warning(f"Could not retrieve Vegetation data (API Error). Factor is 0.5.")
-
-            # 4. WEIGHTED OVERLAY
-            lsm = slope_norm.multiply(p['w_slope']) \
-                .add(rain_norm.multiply(p['w_rain'])) \
-                .add(ndvi_inv.multiply(p['w_ndvi']))
+            # 5. WEIGHTED COMBINATION
+            # Risk = (Slope*Ws) + (TWI*Wt) + (LC*Wl) + (Rain*Wr)
+            risk_map = slope_norm.multiply(p['w_slope']) \
+                .add(twi_norm.multiply(p['w_twi'])) \
+                .add(lc_norm.multiply(p['w_lc'])) \
+                .add(rain_norm.multiply(p['w_rain']))
             
             # Visualization
-            vis_lsm = {
-                'min': 0, 'max': 0.8,
-                'palette': ['green', 'yellow', 'orange', 'red', 'darkred']
+            vis_risk = {
+                'min': 0.2, 'max': 0.8,
+                'palette': ['#006400', '#228B22', '#FFFF00', '#FF8C00', '#FF0000', '#8B0000']
+                # DarkGreen -> ForestGreen -> Yellow -> DarkOrange -> Red -> DarkRed
             }
             
-            m.addLayer(dem, {'min': 0, 'max': 3000, 'palette': ['006633', 'E5FFCC', '662A00', 'D8D8D8', 'F5F5F5']}, 'Elevation (DEM)', False)
-            m.addLayer(slope_norm, {'min': 0, 'max': 1, 'palette': ['white', 'black']}, 'Factor: Slope', False)
-            m.addLayer(rain_norm, {'min': 0, 'max': 1, 'palette': ['white', 'blue']}, 'Factor: Rain', False)
-            m.addLayer(lsm, vis_lsm, 'Susceptibility Index')
-            m.add_colorbar(vis_lsm, label="Risk Index (Low -> High)")
+            m.addLayer(slope_class, {'min':1, 'max':5, 'palette':['green','yellow','red']}, 'Factor: Slope Class', False)
+            m.addLayer(twi, {'min':2, 'max':12, 'palette':['white','blue']}, 'Factor: TWI (Wetness)', False)
+            m.addLayer(lc_risk, {'min':1, 'max':5, 'palette':['gray','green','yellow','orange','red']}, 'Factor: Land Cover Vuln', False)
+            m.addLayer(risk_map, vis_risk, 'Landslide Susceptibility Index (LSI)')
+            m.add_colorbar(vis_risk, label="Susceptibility (Low -> High)")
             
             # Results Panel
             with col_res:
                 st.markdown('<div class="glass-card">', unsafe_allow_html=True)
-                st.markdown('<div class="card-label">⚠️ RISK ASSESSMENT</div>', unsafe_allow_html=True)
+                st.markdown('<div class="card-label">⚠️ HAZARD ANALYSIS</div>', unsafe_allow_html=True)
                 
+                st.info("Method: Heuristic MCDA + TWI")
                 st.markdown(f"""
-                <div style="display:flex; justify-content:space-between; margin-bottom:5px;">
-                    <span style="color:#94a3b8">Slope Weight:</span>
-                    <span style="color:#fff">{p['w_slope']}</span>
-                </div>
-                <div style="display:flex; justify-content:space-between; margin-bottom:5px;">
-                    <span style="color:#94a3b8">Rain Weight:</span>
-                    <span style="color:#fff">{p['w_rain']}</span>
-                </div>
-                <div style="display:flex; justify-content:space-between; margin-bottom:15px;">
-                    <span style="color:#94a3b8">Veg Weight:</span>
-                    <span style="color:#fff">{p['w_ndvi']}</span>
-                </div>
+                <small style="color:#94a3b8">
+                Factors & Weights:<br>
+                • Slope: {p['w_slope']} (Discrete Classes)<br>
+                • Land Cover: {p['w_lc']} (ESA Vulnerability)<br>
+                • Wetness (TWI): {p['w_twi']} (Flow Accumulation)<br>
+                • Rainfall: {p['w_rain']} (Trigger)
+                </small>
                 """, unsafe_allow_html=True)
-                
-                st.info("Method: Weighted Linear Combination (WLC)")
                 
                 st.markdown("---")
                 st.markdown('<div class="card-label">💾 EXPORT</div>', unsafe_allow_html=True)
                 if st.button("☁️ Save GeoTIFF"):
                     ee.batch.Export.image.toDrive(
-                        image=lsm, description=f"LSM_Risk_{datetime.now().strftime('%Y%m%d')}", 
+                        image=risk_map, description=f"LSM_MCDA_{datetime.now().strftime('%Y%m%d')}", 
                         scale=30, region=roi, folder='GEE_Exports'
                     ).start()
                     st.toast("Export Started")
@@ -1058,10 +1066,10 @@ else:
                 if st.button("📷 Render Map (JPG)"):
                     with st.spinner("Generating Map..."):
                         buf = generate_static_map_display(
-                            lsm, roi, vis_lsm, "Landslide Susceptibility", 
-                            cmap_colors=vis_lsm['palette']
+                            risk_map, roi, vis_risk, "Landslide Susceptibility (MCDA)", 
+                            cmap_colors=vis_risk['palette']
                         )
-                        st.download_button("⬇️ Save Image", buf, "Ni30_LSM.jpg", "image/jpeg", use_container_width=True)
+                        st.download_button("⬇️ Save Image", buf, "Ni30_LSM_MCDA.jpg", "image/jpeg", use_container_width=True)
                 st.markdown('</div>', unsafe_allow_html=True)
 
         with col_map:
