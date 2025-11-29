@@ -919,18 +919,21 @@ else:
 
             # 2. VEGETATION & WATER (Sentinel-2)
             # Use safety check for empty S2 collection (cloudy/small roi)
-            s2_col = ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED") \
-                .filterBounds(roi).filterDate(p['start'], p['end']) \
-                .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 20))
-            
             # Default risk if no S2 data (0.5 moderate)
             veg_risk = ee.Image.constant(0.5).clip(roi)
             water_risk = ee.Image.constant(0.5).clip(roi)
 
-            if s2_col.size().getInfo() > 0:
-                s2 = s2_col.median().clip(roi)
-                # Check if image has bands
-                if len(s2.bandNames().getInfo()) > 0:
+            try:
+                s2_col = ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED") \
+                    .filterBounds(roi).filterDate(p['start'], p['end']) \
+                    .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 20))
+                
+                # SAFE CHECK: Use try-except on size().getInfo() because it can timeout or fail
+                # if the request is bad.
+                count_s2 = s2_col.size().getInfo()
+                
+                if count_s2 > 0:
+                    s2 = s2_col.median().clip(roi)
                     # Low NDVI = High Risk (1.0)
                     ndvi = s2.normalizedDifference(['B8', 'B4'])
                     veg_risk = ee.Image(1).subtract(ndvi).clamp(0, 1)
@@ -938,21 +941,28 @@ else:
                     # High NDWI = High Risk (1.0)
                     ndwi = s2.normalizedDifference(['B3', 'B8'])
                     water_risk = ndwi.add(0.5).clamp(0, 1)
-            else:
-                st.warning("⚠️ No clear Sentinel-2 data found. Using default vegetation/moisture risk.")
+                else:
+                    st.warning("⚠️ No Sentinel-2 data found. Using default vegetation risk.")
+            except Exception as e:
+                st.warning(f"⚠️ Sentinel-2 Data Error: {e}. Using defaults.")
 
             # 3. RAINFALL (CHIRPS)
-            # CHIRPS has lag. Check if data exists.
-            rain_col = ee.ImageCollection("UCSB-CHIRPS/PENTAD") \
-                .filterBounds(roi).filterDate(p['start'], p['end'])
-            
             rain_norm = ee.Image.constant(0).clip(roi) # Default to 0 rain if missing
             
-            if rain_col.size().getInfo() > 0:
-                rain = rain_col.mean().clip(roi)
-                rain_norm = rain.divide(50).clamp(0, 1)
-            else:
-                st.warning("⚠️ No Rainfall data found for date range (CHIRPS latency). Using 0 rainfall risk.")
+            try:
+                rain_col = ee.ImageCollection("UCSB-CHIRPS/PENTAD") \
+                    .filterBounds(roi).filterDate(p['start'], p['end'])
+                
+                # SAFE CHECK: Use try-except on size().getInfo()
+                count_rain = rain_col.size().getInfo()
+                
+                if count_rain > 0:
+                    rain = rain_col.mean().clip(roi)
+                    rain_norm = rain.divide(50).clamp(0, 1)
+                else:
+                    st.warning("⚠️ No Rainfall data found (CHIRPS latency). Using 0 rainfall risk.")
+            except Exception as e:
+                st.warning(f"⚠️ Rainfall Data Error: {e}. Skipping rain factor.")
 
             # 4. WEIGHTED OVERLAY
             # Ensure all are float
