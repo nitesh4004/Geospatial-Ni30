@@ -347,7 +347,7 @@ with st.sidebar:
     """, unsafe_allow_html=True)
     
     # MODE SELECTOR
-    mode = st.radio("System Mode", ["Spectral Monitor", "LULC Classifier", "Land Susceptibility Mapping", "Geospatial-embeddings-use-cases"], index=0)
+    mode = st.radio("System Mode", ["Spectral Monitor", "LULC Classifier", "SAR Landslide Detection", "Geospatial-embeddings-use-cases"], index=0)
     st.session_state['mode'] = mode
 
     st.markdown("---")
@@ -391,7 +391,11 @@ with st.sidebar:
     model_choice = "Random Forest"
     embedding_year = 2023
     embedding_task = "LULC (ESA Labels)"
-    w_slope, w_rain, w_veg, w_water = 0.4, 0.2, 0.2, 0.2 # LSM Weights
+    
+    # SAR Vars
+    sar_year_1 = 2019
+    sar_year_2 = 2020
+    sar_threshold = -2.0
 
     if mode == "Spectral Monitor":
         st.markdown("### 2. Sensor Config")
@@ -495,17 +499,17 @@ with st.sidebar:
             cloud = st.slider("Cloud Masking %", 0, 30, 20)
             split_ratio = st.slider("Train/Validation Split", 0.5, 0.9, 0.8)
 
-    elif mode == "Land Susceptibility Mapping":
-        st.markdown("### 2. Multi-Criteria Weights")
-        st.info("Assign importance to risk factors. Higher value = Higher influence on susceptibility.")
+    elif mode == "SAR Landslide Detection":
+        st.markdown("### 2. Detection Parameters")
+        st.info("Detects backscatter loss between two years (default: Almora Event 2019 vs 2020).")
         
-        w_slope = st.slider("⛰️ Slope Influence", 0.0, 1.0, 0.5, 0.1)
-        w_rain = st.slider("🌧️ Rainfall Influence", 0.0, 1.0, 0.2, 0.1)
-        w_veg = st.slider("🌲 Vegetation (Loss) Influence", 0.0, 1.0, 0.2, 0.1)
-        w_water = st.slider("💧 Soil Moisture Influence", 0.0, 1.0, 0.1, 0.1)
+        c1, c2 = st.columns(2)
+        sar_year_1 = c1.number_input("Pre-Event Year", 2015, 2024, 2019)
+        sar_year_2 = c2.number_input("Post-Event Year", 2015, 2024, 2020)
         
-        st.caption("Algorithm uses Weighted Overlay of normalized factors. High Susceptibility = Steep Slope + High Rain + Low Vegetation + High Moisture.")
-        cloud = 10
+        sar_threshold = st.slider("Backscatter Drop Threshold (dB)", -10.0, -1.0, -2.0, 0.5)
+        st.caption("Areas where signal drops below this value are flagged as potential landslides.")
+        cloud = 0
 
     elif mode == "Geospatial-embeddings-use-cases":
         st.markdown("### 2. AI Embeddings Task")
@@ -555,9 +559,9 @@ with st.sidebar:
                     'orbit': orbit, 'vmin': vmin, 'vmax': vmax, 'palette': cur_palette
                 })
             
-            if mode == "Land Susceptibility Mapping":
+            if mode == "SAR Landslide Detection":
                 params.update({
-                    'w_slope': w_slope, 'w_rain': w_rain, 'w_veg': w_veg, 'w_water': w_water
+                    'sar_year_1': sar_year_1, 'sar_year_2': sar_year_2, 'sar_threshold': sar_threshold
                 })
                 
             st.session_state.update(params)
@@ -903,134 +907,105 @@ else:
             m.to_streamlit()
     
     # ==========================================
-    # MODE 3: LAND SUSCEPTIBILITY MAPPING (LSM)
+    # MODE 3: SAR LANDSLIDE DETECTION
     # ==========================================
-    elif p['mode'] == "Land Susceptibility Mapping":
+    elif p['mode'] == "SAR Landslide Detection":
         col_map, col_res = st.columns([3, 1])
         m = geemap.Map(height=700, basemap="HYBRID")
         m.centerObject(roi, 13)
 
-        with st.spinner("⛰️ Calculating Terrain Susceptibility Index..."):
+        with st.spinner("📡 Processing Sentinel-1 SAR Backscatter Change..."):
             
-            # 1. SLOPE (SRTM)
-            dem = ee.Image('USGS/SRTMGL1_003').clip(roi)
-            slope = ee.Terrain.slope(dem)
-            slope_norm = slope.divide(45).clamp(0, 1)
+            def get_s1_collection(roi, start, end):
+                return (ee.ImageCollection('COPERNICUS/S1_GRD')
+                    .filterBounds(roi)
+                    .filterDate(start, end)
+                    .filter(ee.Filter.eq('instrumentMode', 'IW'))
+                    .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VV'))
+                    .select('VV'))
 
-            # 2. VEGETATION & WATER (Sentinel-2)
-            # Use safety check for empty S2 collection (cloudy/small roi)
-            # Default risk if no S2 data (0.5 moderate)
-            veg_risk = ee.Image.constant(0.5).clip(roi)
-            water_risk = ee.Image.constant(0.5).clip(roi)
+            def yearly_sar_mean(roi, year):
+                start = ee.Date.fromYMD(year, 1, 1)
+                end = start.advance(1, 'year')
+                return get_s1_collection(roi, start, end).mean().set('year', year)
 
+            # 1. Generate Yearly Means
             try:
-                s2_col = ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED") \
-                    .filterBounds(roi).filterDate(p['start'], p['end']) \
-                    .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 20))
+                first_year_img = yearly_sar_mean(roi, p['sar_year_1'])
+                last_year_img = yearly_sar_mean(roi, p['sar_year_2'])
                 
-                # SAFE CHECK: Use try-except on size().getInfo() because it can timeout or fail
-                # if the request is bad.
-                count_s2 = s2_col.size().getInfo()
+                # 2. Compute Change
+                backscatter_change = last_year_img.subtract(first_year_img).rename('Change')
                 
-                if count_s2 > 0:
-                    s2 = s2_col.median().clip(roi)
-                    # Low NDVI = High Risk (1.0)
-                    ndvi = s2.normalizedDifference(['B8', 'B4'])
-                    veg_risk = ee.Image(1).subtract(ndvi).clamp(0, 1)
+                # 3. Apply Threshold (Landslide Mask)
+                # Areas with strong decrease in backscatter (e.g., < -2 dB)
+                landslide_mask = backscatter_change.lt(p['sar_threshold'])
+                landslide_zones = landslide_mask.updateMask(landslide_mask) # Transparency
+                
+                # 4. Visualization Params
+                sar_vis = {'min': -25, 'max': 0, 'palette': ['blue', 'white', 'green']}
+                change_vis = {'min': -5, 'max': 5, 'palette': ['red', 'white', 'blue']}
+                slide_vis = {'palette': ['yellow']}
+                
+                # 5. Add Layers
+                m.addLayer(first_year_img.clip(roi), sar_vis, f'SAR VV ({p["sar_year_1"]})', False)
+                m.addLayer(last_year_img.clip(roi), sar_vis, f'SAR VV ({p["sar_year_2"]})', False)
+                m.addLayer(backscatter_change.clip(roi), change_vis, 'Backscatter Change')
+                m.addLayer(landslide_zones.clip(roi), slide_vis, 'Potential Landslide Zones')
+                
+                # --- RESULTS PANE ---
+                with col_res:
+                    st.markdown('<div class="glass-card">', unsafe_allow_html=True)
+                    st.markdown('<div class="card-label">⛰️ LANDSLIDE STATS</div>', unsafe_allow_html=True)
                     
-                    # High NDWI = High Risk (1.0)
-                    ndwi = s2.normalizedDifference(['B3', 'B8'])
-                    water_risk = ndwi.add(0.5).clamp(0, 1)
-                else:
-                    st.warning("⚠️ No Sentinel-2 data found. Using default vegetation risk.")
+                    # 6. Area Calculation
+                    try:
+                        area_img = landslide_mask.multiply(ee.Image.pixelArea().divide(1e6)) # km2
+                        
+                        stats = area_img.reduceRegion(
+                            reducer=ee.Reducer.sum(),
+                            geometry=roi,
+                            scale=100, # Using coarser scale for instant UI stats (prevent timeout)
+                            maxPixels=1e9
+                        ).getInfo()
+                        
+                        total_area = list(stats.values())[0] if stats else 0
+                        
+                        st.metric("Detected Landslide Area", f"{total_area:.4f} km²")
+                        st.caption(f"Based on change < {p['sar_threshold']} dB")
+                        
+                    except Exception as e:
+                        st.warning("Area calculation timeout (Region too big).")
+
+                    st.markdown("---")
+                    st.markdown(f"**Comparison:** {p['sar_year_1']} vs {p['sar_year_2']}")
+                    
+                    st.markdown("---")
+                    if st.button("☁️ Export Landslide Map"):
+                        ee.batch.Export.image.toDrive(
+                            image=landslide_zones.clip(roi), 
+                            description=f"Landslide_Zones_{p['sar_year_1']}_{p['sar_year_2']}", 
+                            region=roi,
+                            scale=10, 
+                            crs='EPSG:4326',
+                            folder='GEE_Landslides'
+                        ).start()
+                        st.toast("Export Started to Drive")
+                    
+                    st.markdown("---")
+                    if st.button("📷 Render Map (JPG)"):
+                         with st.spinner("Generating Map..."):
+                            # Overlay landslides (yellow) on SAR
+                            buf = generate_static_map_display(
+                                landslide_zones, roi, slide_vis, f"Landslide Detection | {p['sar_year_1']}-{p['sar_year_2']}", 
+                                is_categorical=True, class_names=['Landslide']
+                            )
+                            st.download_button("⬇️ Save Image", buf, "Ni30_Landslides.jpg", "image/jpeg", use_container_width=True)
+
+                    st.markdown('</div>', unsafe_allow_html=True)
+
             except Exception as e:
-                st.warning(f"⚠️ Sentinel-2 Data Error: {e}. Using defaults.")
-
-            # 3. RAINFALL (CHIRPS)
-            rain_norm = ee.Image.constant(0).clip(roi) # Default to 0 rain if missing
-            
-            try:
-                rain_col = ee.ImageCollection("UCSB-CHIRPS/PENTAD") \
-                    .filterBounds(roi).filterDate(p['start'], p['end'])
-                
-                # SAFE CHECK: Use try-except on size().getInfo()
-                count_rain = rain_col.size().getInfo()
-                
-                if count_rain > 0:
-                    rain = rain_col.mean().clip(roi)
-                    rain_norm = rain.divide(50).clamp(0, 1)
-                else:
-                    st.warning("⚠️ No Rainfall data found (CHIRPS latency). Using 0 rainfall risk.")
-            except Exception as e:
-                st.warning(f"⚠️ Rainfall Data Error: {e}. Skipping rain factor.")
-
-            # 4. WEIGHTED OVERLAY
-            # Ensure all are float
-            lsm_index = (slope_norm.toFloat().multiply(p['w_slope'])) \
-                        .add(rain_norm.toFloat().multiply(p['w_rain'])) \
-                        .add(veg_risk.toFloat().multiply(p['w_veg'])) \
-                        .add(water_risk.toFloat().multiply(p['w_water']))
-
-            # Visualization
-            lsm_vis = {
-                'min': 0.2, 
-                'max': 0.7, 
-                'palette': ['#1a9641', '#a6d96a', '#ffffbf', '#fdae61', '#d7191c']
-            }
-
-            m.addLayer(lsm_index, lsm_vis, 'Susceptibility Index')
-            
-            # --- RESULTS PANE ---
-            with col_res:
-                st.markdown('<div class="glass-card">', unsafe_allow_html=True)
-                st.markdown('<div class="card-label">⚠️ RISK PROFILE</div>', unsafe_allow_html=True)
-                
-                try:
-                    stats = lsm_index.reduceRegion(
-                        reducer=ee.Reducer.mean(),
-                        geometry=roi,
-                        scale=100, 
-                        maxPixels=1e9
-                    ).getInfo()
-                    # Band name usually defaults to 'slope' from the first band added
-                    # or we can get values()
-                    val_list = list(stats.values())
-                    avg_risk = val_list[0] if val_list else 0
-                    
-                    st.metric("Avg Risk Index", f"{avg_risk:.2f}")
-                    
-                    if avg_risk > 0.6:
-                        st.error("CRITICAL INSTABILITY DETECTED")
-                    elif avg_risk > 0.4:
-                        st.warning("MODERATE CAUTION")
-                    else:
-                        st.success("STABLE TERRAIN")
-                except:
-                    st.caption("Stats unavailable for large area")
-
-                st.markdown("---")
-                st.markdown("**Influencing Factors:**")
-                st.progress(p['w_slope'], text="Slope Weight")
-                st.progress(p['w_rain'], text="Rainfall Weight")
-                
-                st.markdown("---")
-                if st.button("☁️ Export Risk Map"):
-                    ee.batch.Export.image.toDrive(
-                        image=lsm_index, description=f"LSM_Risk_{datetime.now().strftime('%Y%m%d')}", 
-                        scale=30, region=roi, folder='GEE_Exports'
-                    ).start()
-                    st.toast("Export Started")
-                
-                st.markdown("---")
-                if st.button("📷 Render Map (JPG)"):
-                     with st.spinner("Generating Map..."):
-                        buf = generate_static_map_display(
-                            lsm_index, roi, lsm_vis, f"Susceptibility Index", 
-                            cmap_colors=lsm_vis['palette']
-                        )
-                        st.download_button("⬇️ Save Image", buf, "Ni30_LSM.jpg", "image/jpeg", use_container_width=True)
-
-                st.markdown('</div>', unsafe_allow_html=True)
+                st.error(f"Processing Error: {e}. Check if SAR data exists for these years.")
 
         with col_map:
             m.to_streamlit()
