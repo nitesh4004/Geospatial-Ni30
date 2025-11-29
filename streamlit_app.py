@@ -982,25 +982,43 @@ else:
             # 2. HYDROLOGY (Topographic Wetness Index - TWI)
             # TWI = ln(FlowAcc / tan(Slope))
             # Identifies areas of flow convergence and saturation
-            flow_acc = ee.Image("WWF/HydroSHEDS/15ACC").clip(roi)
-            slope_rad = slope.multiply(3.14159/180) # deg to rad
-            twi = flow_acc.expression(
-                "log(b('b1') + 1) - log(tan(b('slope')) + 0.01)",
-                {'b1': flow_acc, 'slope': slope_rad}
-            ).rename('twi')
-            twi_norm = twi.unitScale(0, 15).clamp(0, 1)
+            twi_norm = ee.Image(0).clip(roi)
+            twi = ee.Image(0).clip(roi)
+            
+            try:
+                # Check HydroSHEDS availability specifically
+                flow_img = ee.Image("WWF/HydroSHEDS/15ACC")
+                # Lightweight check to ensure dataset is accessible before compute
+                flow_img.bandNames().getInfo()
+                
+                flow_acc = flow_img.clip(roi)
+                slope_rad = slope.multiply(3.14159/180) # deg to rad
+                twi_calc = flow_acc.expression(
+                    "log(b('b1') + 1) - log(tan(b('slope')) + 0.01)",
+                    {'b1': flow_acc, 'slope': slope_rad}
+                ).rename('twi')
+                twi = twi_calc
+                twi_norm = twi.unitScale(0, 15).clamp(0, 1)
+            except Exception as e:
+                st.warning(f"TWI (Hydrology) calculation failed: {e}. Factor set to 0.")
 
             # 3. LAND COVER VULNERABILITY (ESA WorldCover)
             # Stable: Trees(10), Mangroves(95) -> Risk 2
             # Medium: Shrub(20), Grass(30) -> Risk 3
             # High: Crop(40), Bare(60) -> Risk 4/5
             # Low: Built(50 - engineered), Snow(70), Water(80) -> Risk 1
-            esa = ee.Image("ESA/WorldCover/v200/2021").clip(roi)
-            lc_risk = esa.remap(
-                [10, 20, 30, 40, 50, 60, 70, 80, 90, 95, 100],
-                [2,  3,  3,  4,  1,  5,  1,  0,  1,  1,  1]  # Risk Score 1-5
-            )
-            lc_norm = lc_risk.divide(5)
+            lc_norm = ee.Image(0).clip(roi)
+            lc_risk = ee.Image(1).clip(roi) # Default to lowest risk if fails
+            
+            try:
+                esa = ee.Image("ESA/WorldCover/v200/2021").clip(roi)
+                lc_risk = esa.remap(
+                    [10, 20, 30, 40, 50, 60, 70, 80, 90, 95, 100],
+                    [2,  3,  3,  4,  1,  5,  1,  0,  1,  1,  1]  # Risk Score 1-5
+                )
+                lc_norm = lc_risk.divide(5)
+            except Exception as e:
+                st.warning(f"Land Cover data unavailable: {e}. Factor set to 0.")
 
             # 4. RAINFALL TRIGGER (CHIRPS)
             rain_norm = ee.Image(0).clip(roi)
@@ -1031,11 +1049,26 @@ else:
                 # DarkGreen -> ForestGreen -> Yellow -> DarkOrange -> Red -> DarkRed
             }
             
-            m.addLayer(slope_class, {'min':1, 'max':5, 'palette':['green','yellow','red']}, 'Factor: Slope Class', False)
-            m.addLayer(twi, {'min':2, 'max':12, 'palette':['white','blue']}, 'Factor: TWI (Wetness)', False)
-            m.addLayer(lc_risk, {'min':1, 'max':5, 'palette':['gray','green','yellow','orange','red']}, 'Factor: Land Cover Vuln', False)
-            m.addLayer(risk_map, vis_risk, 'Landslide Susceptibility Index (LSI)')
-            m.add_colorbar(vis_risk, label="Susceptibility (Low -> High)")
+            # Add Layers with individual Error Handling
+            # This prevents one bad layer from crashing the whole map
+            try:
+                m.addLayer(slope_class, {'min':1, 'max':5, 'palette':['green','yellow','red']}, 'Factor: Slope Class', False)
+            except: pass
+            
+            try:
+                m.addLayer(twi, {'min':2, 'max':12, 'palette':['white','blue']}, 'Factor: TWI (Wetness)', False)
+            except Exception as e:
+                st.warning(f"Could not render TWI Layer: {e}")
+                
+            try:
+                m.addLayer(lc_risk, {'min':1, 'max':5, 'palette':['gray','green','yellow','orange','red']}, 'Factor: Land Cover Vuln', False)
+            except: pass
+            
+            try:
+                m.addLayer(risk_map, vis_risk, 'Landslide Susceptibility Index (LSI)')
+                m.add_colorbar(vis_risk, label="Susceptibility (Low -> High)")
+            except Exception as e:
+                st.error(f"Could not render Risk Map: {e}")
             
             # Results Panel
             with col_res:
