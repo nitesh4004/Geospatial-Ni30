@@ -802,10 +802,14 @@ else:
                         st.toast("Export Started to GDrive")
                     
                     st.markdown("---")
+                    
+                    # USER INPUT FOR MAP TITLE
+                    map_title = st.text_input("Map Title", "Dynamic World LULC Analysis")
+                    
                     if st.button("📷 Render Map (JPG)"):
                         with st.spinner("Generating Map..."):
                             buf = generate_static_map_display(
-                                dw_image, roi, dw_vis, "Dynamic World (DL)", 
+                                dw_image, roi, dw_vis, map_title, 
                                 is_categorical=True, class_names=dw_names
                             )
                             st.download_button("⬇️ Save Image", buf, "Ni30_DW_LULC.jpg", "image/jpeg", use_container_width=True)
@@ -946,10 +950,14 @@ else:
                             st.toast("Export Started")
 
                         st.markdown("---")
+                        
+                        # USER INPUT FOR MAP TITLE
+                        map_title = st.text_input("Map Title", "LULC Classification Analysis")
+                        
                         if st.button("📷 Render Map (JPG)"):
                             with st.spinner("Generating Map..."):
                                 buf = generate_static_map_display(
-                                    lulc_class, roi, vis_params, f"LULC | {p['model_choice']}", 
+                                    lulc_class, roi, vis_params, map_title, 
                                     is_categorical=True, class_names=class_names
                                 )
                                 st.download_button("⬇️ Save Image", buf, "Ni30_LULC.jpg", "image/jpeg", use_container_width=True)
@@ -1049,26 +1057,30 @@ else:
                     m.addLayer(remapped, vis_remap, f"LULC {target_year} (Embeddings)")
                     
                     with col_res:
-                         st.markdown('<div class="glass-card">', unsafe_allow_html=True)
-                         st.markdown('<div class="card-label">🔍 ANALYSIS</div>', unsafe_allow_html=True)
-                         st.success("Model Trained on 2021 Data")
-                         st.info(f"Inference on {target_year}")
-                         if st.button("☁️ Export Map"):
+                          st.markdown('<div class="glass-card">', unsafe_allow_html=True)
+                          st.markdown('<div class="card-label">🔍 ANALYSIS</div>', unsafe_allow_html=True)
+                          st.success("Model Trained on 2021 Data")
+                          st.info(f"Inference on {target_year}")
+                          if st.button("☁️ Export Map"):
                             ee.batch.Export.image.toDrive(
                                 image=classified, description=f"Emb_LULC_{target_year}", 
                                 scale=20, region=roi, folder='GEE_Exports'
                             ).start()
                             st.toast("Export task started")
-                         
-                         st.markdown("---")
-                         if st.button("📷 Render Map (JPG)"):
+                          
+                          st.markdown("---")
+                          
+                          # USER INPUT FOR MAP TITLE
+                          map_title = st.text_input("Map Title", f"LULC Embeddings {target_year}")
+
+                          if st.button("📷 Render Map (JPG)"):
                              with st.spinner("Generating Map..."):
                                  buf = generate_static_map_display(
-                                     remapped, roi, vis_remap, f"LULC (Embeddings) | {target_year}", 
+                                     remapped, roi, vis_remap, map_title, 
                                      is_categorical=True, class_names=class_names_esa
                                  )
                                  st.download_button("⬇️ Save Image", buf, "Ni30_Emb_LULC.jpg", "image/jpeg", use_container_width=True)
-                         st.markdown('</div>', unsafe_allow_html=True)
+                          st.markdown('</div>', unsafe_allow_html=True)
 
                 else:
                     st.error("Training data (2021 Embeddings) missing.")
@@ -1100,10 +1112,14 @@ else:
                     st.info("Unsupervised grouping of terrain features.")
                     st.caption("Useful for detecting water bodies or major land changes without labels.")
                     st.markdown("---")
+                    
+                    # USER INPUT FOR MAP TITLE
+                    map_title = st.text_input("Map Title", f"Clustering Analysis {target_year}")
+
                     if st.button("📷 Render Map (JPG)"):
                              with st.spinner("Generating Map..."):
                                  buf = generate_static_map_display(
-                                     result, roi, cluster_vis, f"Clusters | {target_year}", 
+                                     result, roi, cluster_vis, map_title, 
                                      is_categorical=False # Clusters are cat, but random colors make legend hard
                                  )
                                  st.download_button("⬇️ Save Image", buf, "Ni30_Clusters.jpg", "image/jpeg", use_container_width=True)
@@ -1216,10 +1232,14 @@ else:
                      st.toast("Export started")
                 
                 st.markdown("---")
+                
+                # USER INPUT FOR MAP TITLE
+                map_title = st.text_input("Map Title", "Landslide Event Analysis")
+
                 if st.button("📷 Save Map Report"):
                      buf = generate_static_map_display(
                          detected_slides, roi, {'min':0, 'max':1, 'palette':['red']}, 
-                         "Landslide Detection | S1 SAR", is_categorical=True, class_names=["Landslide"]
+                         map_title, is_categorical=True, class_names=["Landslide"]
                      )
                      st.download_button("⬇️ Save Image", buf, "Ni30_Landslide.jpg", "image/jpeg", use_container_width=True)
 
