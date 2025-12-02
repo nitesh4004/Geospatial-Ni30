@@ -258,49 +258,84 @@ def add_lulc_indices(image):
     
     return image.addBands([ndvi, evi, gndvi, ndwi, ndmi])
 
+def calculate_area_by_class(image, region, scale, class_names=None):
+    """
+    Calculates the area of each class in hectares and returns a DataFrame.
+    """
+    # Create an area image (pixel area in square meters)
+    area_image = ee.Image.pixelArea().addBands(image)
+    
+    # Reduce region to get sum of areas per class group
+    # We use group(1) because band 0 is area, band 1 is the class index
+    stats = area_image.reduceRegion(
+        reducer=ee.Reducer.sum().group(
+            groupField=1, 
+            groupName='class_index'
+        ),
+        geometry=region,
+        scale=scale,
+        maxPixels=1e10, # Allow large computations
+        bestEffort=True
+    )
+    
+    groups = stats.get('groups').getInfo()
+    data = []
+    total_area = 0
+    
+    if not groups:
+        return pd.DataFrame()
+
+    for item in groups:
+        c_idx = int(item['class_index'])
+        area_sqm = item['sum']
+        area_ha = area_sqm / 10000.0 # Convert to Hectares
+        total_area += area_ha
+        
+        # Determine Class Name
+        name = f"Class {c_idx}"
+        if class_names:
+            # Check bounds to avoid index errors
+            if 0 <= c_idx < len(class_names):
+                name = class_names[c_idx]
+            else:
+                name = f"Class {c_idx}"
+        
+        data.append({"Class": name, "Area (ha)": area_ha})
+    
+    df = pd.DataFrame(data)
+    
+    if not df.empty:
+        # Sort by area descending
+        df = df.sort_values(by="Area (ha)", ascending=False)
+        # Add Percentage column
+        df["%"] = ((df["Area (ha)"] / total_area) * 100).round(1)
+        # Round Area
+        df["Area (ha)"] = df["Area (ha)"].round(2)
+        
+    return df
+
 def add_scale_bar(ax, bounds):
     """
     Adds a scale bar to the matplotlib axes based on bounding box coordinates (WGS84).
     bounds: [min_lon, min_lat, max_lon, max_lat]
     """
     min_x, min_y, max_x, max_y = bounds
-    
-    # Calculate center lat for approximation
     center_lat = (min_y + max_y) / 2
-    
-    # Approx degrees per meter
-    # Lat: 1 deg ~= 111320 m
-    # Lon: 1 deg ~= 111320 * cos(lat) m
     met_per_deg_lat = 111320
     met_per_deg_lon = 111320 * np.cos(np.radians(center_lat))
-    
-    # Width of map in meters
     width_deg = max_x - min_x
     width_met = width_deg * met_per_deg_lon
-    
-    # Target scale bar size: ~1/5 of map width
     target_len_met = width_met / 5
-    
-    # Round to nice number
     order = 10 ** np.floor(np.log10(target_len_met))
     nice_len_met = round(target_len_met / order) * order
-    
-    # Convert back to degrees for plotting
     nice_len_deg = nice_len_met / met_per_deg_lon
-    
-    # Position: Bottom right corner, with padding
     pad_x = width_deg * 0.05
     pad_y = (max_y - min_y) * 0.05
-    
     start_x = max_x - pad_x - nice_len_deg
     start_y = min_y + pad_y
-    
-    # Draw scale bar
     rect = mpatches.Rectangle((start_x, start_y), nice_len_deg, (max_y-min_y)*0.008, 
                               linewidth=1, edgecolor='white', facecolor='white')
     ax.add_patch(rect)
-    
-    # Add text
     label = f"{int(nice_len_met/1000)} km" if nice_len_met >= 1000 else f"{int(nice_len_met)} m"
     ax.text(start_x + nice_len_deg/2, start_y + (max_y-min_y)*0.02, label, 
             color='white', ha='center', va='bottom', fontsize=10, fontweight='bold',
@@ -309,12 +344,10 @@ def add_scale_bar(ax, bounds):
 
 def generate_static_map_display(image, roi, vis_params, title, cmap_colors=None, is_categorical=False, class_names=None):
     try:
-        # Fetch image with CRS 4326 to match Lat/Lon extent
-        # We visualize on server side to ensure we get an RGB image, preventing complex compute timeouts
         if 'palette' in vis_params or 'min' in vis_params:
             ready_img = image.visualize(**vis_params)
         else:
-            ready_img = image # Fallback or pre-visualized
+            ready_img = image 
             
         thumb_url = ready_img.getThumbURL({
             'region': roi,
@@ -324,12 +357,10 @@ def generate_static_map_display(image, roi, vis_params, title, cmap_colors=None,
         
         response = requests.get(thumb_url, timeout=30)
         
-        # Robust Error Handling
         if response.status_code != 200:
             st.error(f"GEE Server Error (Status {response.status_code})")
             return None
             
-        # Check if content type is actually an image
         content_type = response.headers.get('content-type', '')
         if 'image' not in content_type:
             st.error(f"GEE Error: {response.text}")
@@ -337,7 +368,6 @@ def generate_static_map_display(image, roi, vis_params, title, cmap_colors=None,
 
         img_pil = Image.open(BytesIO(response.content))
         
-        # Calculate Extent for Lat/Lon Grid
         bounds_poly = roi.bounds().getInfo()['coordinates'][0]
         lons = [p[0] for p in bounds_poly]
         lats = [p[1] for p in bounds_poly]
@@ -346,32 +376,24 @@ def generate_static_map_display(image, roi, vis_params, title, cmap_colors=None,
         fig, ax = plt.subplots(figsize=(10, 10), dpi=600, facecolor='#050509')
         ax.set_facecolor('#050509')
         
-        # Plot Image with geographic extent
         im = ax.imshow(img_pil, extent=extent, aspect='auto')
-        
-        # TITLE
         ax.set_title(title, fontsize=16, fontweight='bold', pad=20, color='#00f2ff')
         
-        # LAT/LONG GRID & TICKS
         ax.tick_params(colors='white', labelcolor='white', labelsize=8)
         ax.grid(color='white', linestyle='--', linewidth=0.5, alpha=0.2)
         for spine in ax.spines.values():
             spine.set_edgecolor('white')
             spine.set_alpha(0.3)
         
-        # SCALE BAR
         try:
             add_scale_bar(ax, extent)
         except Exception as e:
             print(f"Scale bar error: {e}")
 
-        # LEGEND / COLORBAR
         if is_categorical and class_names and 'palette' in vis_params:
             patches = []
             for name, color in zip(class_names, vis_params['palette']):
                 patches.append(mpatches.Patch(color=color, label=name))
-            
-            # Place legend outside or neatly inside
             legend = ax.legend(handles=patches, loc='upper center', bbox_to_anchor=(0.5, -0.05), 
                                frameon=False, title="Classes", ncol=3)
             plt.setp(legend.get_title(), color='white', fontweight='bold')
@@ -379,12 +401,11 @@ def generate_static_map_display(image, roi, vis_params, title, cmap_colors=None,
                 text.set_color("white")
                 
         elif cmap_colors and 'min' in vis_params:
-            # Continuous Colorbar
             cmap = mcolors.LinearSegmentedColormap.from_list("custom", cmap_colors)
             norm = mcolors.Normalize(vmin=vis_params['min'], vmax=vis_params['max'])
             sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
             sm.set_array([])
-            cax = fig.add_axes([0.92, 0.15, 0.03, 0.7]) # [left, bottom, width, height]
+            cax = fig.add_axes([0.92, 0.15, 0.03, 0.7]) 
             cbar = plt.colorbar(sm, cax=cax)
             cbar.ax.yaxis.set_tick_params(color='white')
             cbar.set_label('Value', color='white')
@@ -818,7 +839,13 @@ else:
                     st.markdown('<div class="glass-card">', unsafe_allow_html=True)
                     st.markdown('<div class="card-label">🧠 MODEL METRICS</div>', unsafe_allow_html=True)
                     st.info("Pre-trained Global Model")
-                    st.caption("Metrics not applicable for pre-trained inference.")
+                    
+                    st.markdown('<div class="card-label">📊 AREA STATS</div>', unsafe_allow_html=True)
+                    with st.spinner("Calculating areas..."):
+                         df_area = calculate_area_by_class(dw_image, roi, 10, dw_names)
+                         if not df_area.empty:
+                             st.dataframe(df_area, hide_index=True, use_container_width=True)
+                    
                     st.markdown("---")
                     st.markdown('<div class="card-label">💾 EXPORT RESULT</div>', unsafe_allow_html=True)
                     if st.button("☁️ Save to Drive"):
@@ -968,6 +995,12 @@ else:
                         c_a.markdown(f"""<div class="metric-value">{overall_accuracy:.2%}</div><div class="metric-sub">Accuracy</div>""", unsafe_allow_html=True)
                         c_b.markdown(f"""<div class="metric-value">{kappa:.3f}</div><div class="metric-sub">Kappa</div>""", unsafe_allow_html=True)
                         
+                        st.markdown('<div class="card-label">📊 AREA STATS</div>', unsafe_allow_html=True)
+                        with st.spinner("Calculating areas..."):
+                             df_area = calculate_area_by_class(lulc_class, roi, 10, class_names)
+                             if not df_area.empty:
+                                 st.dataframe(df_area, hide_index=True, use_container_width=True)
+                        
                         st.markdown("---")
                         st.markdown('<div class="card-label">💾 EXPORT</div>', unsafe_allow_html=True)
                         if st.button("☁️ Save to Drive"):
@@ -1090,6 +1123,14 @@ else:
                           st.markdown('<div class="card-label">🔍 ANALYSIS</div>', unsafe_allow_html=True)
                           st.success("Model Trained on 2021 Data")
                           st.info(f"Inference on {target_year}")
+                          
+                          st.markdown('<div class="card-label">📊 AREA STATS</div>', unsafe_allow_html=True)
+                          with st.spinner("Calculating areas..."):
+                               # Note: we use 'remapped' here so the indices 0-9 match 'class_names_esa'
+                               df_area = calculate_area_by_class(remapped, roi, 20, class_names_esa)
+                               if not df_area.empty:
+                                   st.dataframe(df_area, hide_index=True, use_container_width=True)
+                          
                           if st.button("☁️ Export Map"):
                             ee.batch.Export.image.toDrive(
                                 image=classified, description=f"Emb_LULC_{target_year}", 
@@ -1141,6 +1182,13 @@ else:
                     st.markdown('<div class="card-label">💧 CLUSTERING</div>', unsafe_allow_html=True)
                     st.info("Unsupervised grouping of terrain features.")
                     st.caption("Useful for detecting water bodies or major land changes without labels.")
+                    
+                    st.markdown('<div class="card-label">📊 CLUSTER AREA</div>', unsafe_allow_html=True)
+                    with st.spinner("Calculating areas..."):
+                         df_area = calculate_area_by_class(result, roi, 20, [f"Cluster {i}" for i in range(n_clusters)])
+                         if not df_area.empty:
+                             st.dataframe(df_area, hide_index=True, use_container_width=True)
+                    
                     st.markdown("---")
                     
                     # USER INPUT FOR MAP TITLE
