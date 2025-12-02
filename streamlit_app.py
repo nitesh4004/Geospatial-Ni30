@@ -156,17 +156,20 @@ st.markdown("""
 
 # --- 3. AUTHENTICATION ---
 try:
-    service_account = st.secrets["gcp_service_account"]["client_email"]
-    secret_dict = dict(st.secrets["gcp_service_account"])
-    key_data = json.dumps(secret_dict) 
-    credentials = ee.ServiceAccountCredentials(service_account, key_data=key_data)
-    ee.Initialize(credentials)
-except Exception:
-    try:
+    # Try getting secrets first
+    if "gcp_service_account" in st.secrets:
+        service_account = st.secrets["gcp_service_account"]["client_email"]
+        secret_dict = dict(st.secrets["gcp_service_account"])
+        key_data = json.dumps(secret_dict) 
+        credentials = ee.ServiceAccountCredentials(service_account, key_data=key_data)
+        ee.Initialize(credentials)
+    else:
+        # Fallback to local auth
         ee.Initialize()
-    except Exception as e:
-        st.error(f"⚠️ Authentication Error: {e}")
-        st.stop()
+except Exception as e:
+    st.error(f"⚠️ Authentication Error: {e}")
+    st.info("If running locally, please run `earthengine authenticate` in your terminal.")
+    st.stop()
 
 if 'calculated' not in st.session_state: st.session_state['calculated'] = False
 if 'dates' not in st.session_state: st.session_state['dates'] = []
@@ -260,11 +263,13 @@ def add_lulc_indices(image):
 
 def calculate_area_stats(image, roi, scale, class_names, class_values=None):
     """
-    Calculates area for each class in the image within the ROI.
-    Returns an HTML string for the table.
+    Robust Area Calculator: Handles empty regions/crashes gracefully.
     """
     try:
+        # 1. Create pixel area image
         area_image = ee.Image.pixelArea().addBands(image)
+        
+        # 2. Reduce region to get sums (Area) per class
         stats = area_image.reduceRegion(
             reducer=ee.Reducer.sum().group(
                 groupField=1,
@@ -276,7 +281,17 @@ def calculate_area_stats(image, roi, scale, class_names, class_values=None):
             bestEffort=True
         )
         
-        roi_stats = stats.get('groups').getInfo()
+        # 3. Safely retrieve groups
+        groups = stats.get('groups').getInfo()
+        
+        # 4. Handle Empty Result (The fix for the crash)
+        if not groups:
+            return """
+            <div style="background:rgba(255,165,0,0.1); border-left:3px solid orange; padding:10px; margin-top:10px;">
+                <p style="color:orange; margin:0; font-size:0.9rem;">⚠️ No classification data found in this region.</p>
+                <p style="color:#94a3b8; margin:0; font-size:0.8rem;">Try increasing ROI size or adjusting cloud masking.</p>
+            </div>
+            """
         
         # Mapping Class Code to Name
         lookup = {}
@@ -290,10 +305,7 @@ def calculate_area_stats(image, roi, scale, class_names, class_values=None):
         data = []
         total_area = 0
         
-        if not roi_stats:
-            return "<p style='color:orange'>No stats calculated (Region might be too small or masked).</p>"
-
-        for item in roi_stats:
+        for item in groups:
             c_code = int(item['class_code'])
             area_sqm = item['sum']
             area_ha = area_sqm / 10000.0
