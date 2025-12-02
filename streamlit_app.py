@@ -258,49 +258,98 @@ def add_lulc_indices(image):
     
     return image.addBands([ndvi, evi, gndvi, ndwi, ndmi])
 
+def calculate_area_stats(image, roi, scale, class_names, class_values=None):
+    """
+    Calculates area for each class in the image within the ROI.
+    Returns an HTML string for the table.
+    """
+    try:
+        area_image = ee.Image.pixelArea().addBands(image)
+        stats = area_image.reduceRegion(
+            reducer=ee.Reducer.sum().group(
+                groupField=1,
+                groupName='class_code'
+            ),
+            geometry=roi,
+            scale=scale,
+            maxPixels=1e10,
+            bestEffort=True
+        )
+        
+        roi_stats = stats.get('groups').getInfo()
+        
+        # Mapping Class Code to Name
+        lookup = {}
+        if class_values:
+            for name, val in zip(class_names, class_values):
+                lookup[int(val)] = name
+        else:
+            for i, name in enumerate(class_names):
+                lookup[i] = name
+                
+        data = []
+        total_area = 0
+        
+        if not roi_stats:
+            return "<p style='color:orange'>No stats calculated (Region might be too small or masked).</p>"
+
+        for item in roi_stats:
+            c_code = int(item['class_code'])
+            area_sqm = item['sum']
+            area_ha = area_sqm / 10000.0
+            total_area += area_ha
+            c_name = lookup.get(c_code, f"Class {c_code}")
+            data.append({"Class": c_name, "Area (ha)": area_ha})
+            
+        # Sort and Add Percents
+        data.sort(key=lambda x: x["Area (ha)"], reverse=True)
+        
+        html = """<table style="width:100%; font-size:0.85rem; color:#e2e8f0; border-collapse: collapse; margin-top:10px;">
+        <tr style="border-bottom:1px solid #334155; color:#94a3b8;">
+            <th style="text-align:left; padding:5px;">CLASS</th>
+            <th style="text-align:right; padding:5px;">AREA (ha)</th>
+            <th style="text-align:right; padding:5px;">%</th>
+        </tr>"""
+        
+        for d in data:
+            pct = (d["Area (ha)"] / total_area * 100) if total_area > 0 else 0
+            html += f"""
+            <tr style="border-bottom:1px solid rgba(255,255,255,0.05);">
+                <td style="padding:5px; font-weight:600;">{d['Class']}</td>
+                <td style="text-align:right; padding:5px; color:#00f2ff;">{d['Area (ha)']:,.2f}</td>
+                <td style="text-align:right; padding:5px;">{pct:.1f}%</td>
+            </tr>
+            """
+        html += f"""
+        <tr style="border-top:1px solid #fff;">
+            <td style="padding:8px; font-weight:bold;">TOTAL</td>
+            <td style="text-align:right; padding:8px; font-weight:bold;">{total_area:,.2f}</td>
+            <td></td>
+        </tr></table>"""
+        
+        return html
+    except Exception as e:
+        return f"<p style='color:red'>Calc Error: {str(e)}</p>"
+
+
 def add_scale_bar(ax, bounds):
-    """
-    Adds a scale bar to the matplotlib axes based on bounding box coordinates (WGS84).
-    bounds: [min_lon, min_lat, max_lon, max_lat]
-    """
     min_x, min_y, max_x, max_y = bounds
-    
-    # Calculate center lat for approximation
     center_lat = (min_y + max_y) / 2
-    
-    # Approx degrees per meter
-    # Lat: 1 deg ~= 111320 m
-    # Lon: 1 deg ~= 111320 * cos(lat) m
     met_per_deg_lat = 111320
     met_per_deg_lon = 111320 * np.cos(np.radians(center_lat))
-    
-    # Width of map in meters
     width_deg = max_x - min_x
     width_met = width_deg * met_per_deg_lon
-    
-    # Target scale bar size: ~1/5 of map width
     target_len_met = width_met / 5
-    
-    # Round to nice number
     order = 10 ** np.floor(np.log10(target_len_met))
     nice_len_met = round(target_len_met / order) * order
-    
-    # Convert back to degrees for plotting
     nice_len_deg = nice_len_met / met_per_deg_lon
-    
-    # Position: Bottom right corner, with padding
     pad_x = width_deg * 0.05
     pad_y = (max_y - min_y) * 0.05
-    
     start_x = max_x - pad_x - nice_len_deg
     start_y = min_y + pad_y
-    
-    # Draw scale bar
     rect = mpatches.Rectangle((start_x, start_y), nice_len_deg, (max_y-min_y)*0.008, 
                               linewidth=1, edgecolor='white', facecolor='white')
     ax.add_patch(rect)
-    
-    # Add text
     label = f"{int(nice_len_met/1000)} km" if nice_len_met >= 1000 else f"{int(nice_len_met)} m"
     ax.text(start_x + nice_len_deg/2, start_y + (max_y-min_y)*0.02, label, 
             color='white', ha='center', va='bottom', fontsize=10, fontweight='bold',
@@ -308,7 +357,6 @@ def add_scale_bar(ax, bounds):
 
 
 def generate_static_map_display(image, roi, vis_params, title, cmap_colors=None, is_categorical=False, class_names=None):
-    # Fetch image with CRS 4326 to match Lat/Lon extent
     thumb_url = image.getThumbURL({
         'min': vis_params['min'], 'max': vis_params['max'],
         'palette': vis_params['palette'], 'region': roi,
@@ -317,8 +365,6 @@ def generate_static_map_display(image, roi, vis_params, title, cmap_colors=None,
     })
     response = requests.get(thumb_url)
     img_pil = Image.open(BytesIO(response.content))
-    
-    # Calculate Extent for Lat/Lon Grid
     bounds_poly = roi.bounds().getInfo()['coordinates'][0]
     lons = [p[0] for p in bounds_poly]
     lats = [p[1] for p in bounds_poly]
@@ -326,33 +372,22 @@ def generate_static_map_display(image, roi, vis_params, title, cmap_colors=None,
     
     fig, ax = plt.subplots(figsize=(10, 10), dpi=600, facecolor='#050509')
     ax.set_facecolor('#050509')
-    
-    # Plot Image with geographic extent
     im = ax.imshow(img_pil, extent=extent, aspect='auto')
-    
-    # TITLE
     ax.set_title(title, fontsize=16, fontweight='bold', pad=20, color='#00f2ff')
-    
-    # LAT/LONG GRID & TICKS
     ax.tick_params(colors='white', labelcolor='white', labelsize=8)
     ax.grid(color='white', linestyle='--', linewidth=0.5, alpha=0.2)
     for spine in ax.spines.values():
         spine.set_edgecolor('white')
         spine.set_alpha(0.3)
-    
-    # SCALE BAR
     try:
         add_scale_bar(ax, extent)
     except Exception as e:
         print(f"Scale bar error: {e}")
 
-    # LEGEND / COLORBAR
     if is_categorical and class_names and 'palette' in vis_params:
         patches = []
         for name, color in zip(class_names, vis_params['palette']):
             patches.append(mpatches.Patch(color=color, label=name))
-        
-        # Place legend outside or neatly inside
         legend = ax.legend(handles=patches, loc='upper center', bbox_to_anchor=(0.5, -0.05), 
                            frameon=False, title="Classes", ncol=3)
         plt.setp(legend.get_title(), color='white', fontweight='bold')
@@ -360,12 +395,11 @@ def generate_static_map_display(image, roi, vis_params, title, cmap_colors=None,
             text.set_color("white")
             
     elif cmap_colors:
-        # Continuous Colorbar
         cmap = mcolors.LinearSegmentedColormap.from_list("custom", cmap_colors)
         norm = mcolors.Normalize(vmin=vis_params['min'], vmax=vis_params['max'])
         sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
         sm.set_array([])
-        cax = fig.add_axes([0.92, 0.15, 0.03, 0.7]) # [left, bottom, width, height]
+        cax = fig.add_axes([0.92, 0.15, 0.03, 0.7]) 
         cbar = plt.colorbar(sm, cax=cax)
         cbar.ax.yaxis.set_tick_params(color='white')
         cbar.set_label('Value', color='white')
@@ -644,6 +678,7 @@ if not st.session_state['calculated']:
     </div>
     """, unsafe_allow_html=True)
     m = geemap.Map(height=500, basemap="HYBRID")
+    m.add_inspector() # Enable default inspector
     if st.session_state['roi']:
         m.centerObject(st.session_state['roi'], 12)
         m.addLayer(ee.Image().paint(st.session_state['roi'], 2, 3), {'palette': '#00f2ff'}, 'Target ROI')
@@ -727,6 +762,8 @@ else:
                 m.centerObject(roi, 13)
                 m.addLayer(final_img, vis, f"{p['idx']} ({sel_date})")
                 m.add_colorbar(vis, label=p['idx'], layer_name="Legend")
+                # NEW: Add Inspector
+                m.add_inspector()
                 m.to_streamlit()
 
     # ==========================================
@@ -738,7 +775,8 @@ else:
         col_map, col_res = st.columns([3, 1])
         m = geemap.Map(height=700, basemap="HYBRID")
         m.centerObject(roi, 13)
-        
+        m.add_inspector() # Add Inspector for checking class values
+
         # S2 Background for all modes
         s2_collection = (
             ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
@@ -768,7 +806,6 @@ else:
                     st.stop()
                     
                 # Create Composite (Mode of labels)
-                # The 'label' band contains the class index with highest probability
                 dw_image = dw_col.select('label').mode().clip(roi)
                 
                 # DW Specific Visualization
@@ -786,12 +823,18 @@ else:
                 m.addLayer(dw_image, dw_vis, "Dynamic World LULC")
                 m.add_legend(title="Dynamic World Classes", legend_dict=dict(zip(dw_names, dw_vis['palette'])))
                 
-                # Metrics Display (N/A for Pre-trained)
+                # Metrics Display
                 with col_res:
                     st.markdown('<div class="glass-card">', unsafe_allow_html=True)
                     st.markdown('<div class="card-label">🧠 MODEL METRICS</div>', unsafe_allow_html=True)
                     st.info("Pre-trained Global Model")
-                    st.caption("Metrics not applicable for pre-trained inference.")
+                    
+                    st.markdown("---")
+                    st.markdown('<div class="card-label">📐 AREA ANALYSIS</div>', unsafe_allow_html=True)
+                    # NEW: Area Calculator
+                    area_html = calculate_area_stats(dw_image, roi, 10, dw_names)
+                    st.markdown(area_html, unsafe_allow_html=True)
+
                     st.markdown("---")
                     st.markdown('<div class="card-label">💾 EXPORT RESULT</div>', unsafe_allow_html=True)
                     if st.button("☁️ Save to Drive"):
@@ -870,8 +913,6 @@ else:
                         
                         proxy_name = "Visual Proxy (Random Forest)"
                         # Train proxy for map
-                        features = [ee.Feature(None, {k: row[k] for k in input_bands + ['class_val']}) for i, row in df.iterrows()]
-                        # Fix for Feature creation
                         features = []
                         for i, row in df.iterrows():
                              features.append(ee.Feature(None, {
@@ -941,6 +982,12 @@ else:
                         c_b.markdown(f"""<div class="metric-value">{kappa:.3f}</div><div class="metric-sub">Kappa</div>""", unsafe_allow_html=True)
                         
                         st.markdown("---")
+                        st.markdown('<div class="card-label">📐 AREA ANALYSIS</div>', unsafe_allow_html=True)
+                        # NEW: Area Calculator for Custom Models
+                        area_html = calculate_area_stats(lulc_class, roi, 10, class_names)
+                        st.markdown(area_html, unsafe_allow_html=True)
+
+                        st.markdown("---")
                         st.markdown('<div class="card-label">💾 EXPORT</div>', unsafe_allow_html=True)
                         if st.button("☁️ Save to Drive"):
                             ee.batch.Export.image.toDrive(
@@ -975,7 +1022,8 @@ else:
         col_map, col_res = st.columns([3, 1])
         m = geemap.Map(height=700, basemap="HYBRID")
         m.centerObject(roi, 13)
-        
+        m.add_inspector() # Add Inspector
+
         target_year = int(p['embedding_year'])
         
         # Load Google Satellite Embeddings
@@ -1061,6 +1109,15 @@ else:
                           st.markdown('<div class="card-label">🔍 ANALYSIS</div>', unsafe_allow_html=True)
                           st.success("Model Trained on 2021 Data")
                           st.info(f"Inference on {target_year}")
+
+                          st.markdown("---")
+                          st.markdown('<div class="card-label">📐 AREA ANALYSIS</div>', unsafe_allow_html=True)
+                          # NEW: Area Calculator for Embeddings LULC
+                          # Note: pass class_names_esa and NO class_values list because we remapped to 0-N
+                          area_html = calculate_area_stats(remapped, roi, 20, class_names_esa)
+                          st.markdown(area_html, unsafe_allow_html=True)
+
+                          st.markdown("---")
                           if st.button("☁️ Export Map"):
                             ee.batch.Export.image.toDrive(
                                 image=classified, description=f"Emb_LULC_{target_year}", 
@@ -1074,7 +1131,7 @@ else:
                           map_title = st.text_input("Map Title", f"LULC Embeddings {target_year}")
 
                           if st.button("📷 Render Map (JPG)"):
-                             with st.spinner("Generating Map..."):
+                            with st.spinner("Generating Map..."):
                                  buf = generate_static_map_display(
                                      remapped, roi, vis_remap, map_title, 
                                      is_categorical=True, class_names=class_names_esa
@@ -1111,6 +1168,14 @@ else:
                     st.markdown('<div class="card-label">💧 CLUSTERING</div>', unsafe_allow_html=True)
                     st.info("Unsupervised grouping of terrain features.")
                     st.caption("Useful for detecting water bodies or major land changes without labels.")
+                    
+                    st.markdown("---")
+                    st.markdown('<div class="card-label">📐 AREA ANALYSIS</div>', unsafe_allow_html=True)
+                    # NEW: Area Calculator for Clusters
+                    cluster_names = [f"Cluster {i}" for i in range(n_clusters)]
+                    area_html = calculate_area_stats(result, roi, 20, cluster_names)
+                    st.markdown(area_html, unsafe_allow_html=True)
+                    
                     st.markdown("---")
                     
                     # USER INPUT FOR MAP TITLE
@@ -1120,7 +1185,7 @@ else:
                              with st.spinner("Generating Map..."):
                                  buf = generate_static_map_display(
                                      result, roi, cluster_vis, map_title, 
-                                     is_categorical=False # Clusters are cat, but random colors make legend hard
+                                     is_categorical=False 
                                  )
                                  st.download_button("⬇️ Save Image", buf, "Ni30_Clusters.jpg", "image/jpeg", use_container_width=True)
                     st.markdown('</div>', unsafe_allow_html=True)
@@ -1135,6 +1200,7 @@ else:
         col_map, col_res = st.columns([3, 1])
         m = geemap.Map(height=700, basemap="HYBRID")
         m.centerObject(roi, 13)
+        m.add_inspector() # Add Inspector
         
         with st.spinner("🛰️ Calculating SAR Backscatter Changes & DEM Analysis..."):
             # 1. Get S1 Collections for Pre and Post
@@ -1163,10 +1229,6 @@ else:
                 st.stop()
 
             # 2. Calculate Difference (Log Ratio / dB Difference)
-            # Sentinel-1 GRD is often provided in linear scale by default in some GEE contexts, 
-            # but usually usually pre-processed to dB. If linear, log ratio. If dB, subtraction.
-            # Assuming standard GEE S1 GRD which is sigma0.
-            
             # Convert to dB for consistent math: 10*log10(x)
             pre_db = ee.Image(10).multiply(pre_img.log10())
             post_db = ee.Image(10).multiply(post_img.log10())
