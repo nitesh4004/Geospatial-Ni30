@@ -9,7 +9,7 @@ import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 import matplotlib.patches as mpatches
 from io import BytesIO
-from PIL import Image
+from PIL import Image, UnidentifiedImageError
 from datetime import datetime, timedelta
 import pandas as pd
 import numpy as np
@@ -308,74 +308,100 @@ def add_scale_bar(ax, bounds):
 
 
 def generate_static_map_display(image, roi, vis_params, title, cmap_colors=None, is_categorical=False, class_names=None):
-    # Fetch image with CRS 4326 to match Lat/Lon extent
-    thumb_url = image.getThumbURL({
-        'min': vis_params['min'], 'max': vis_params['max'],
-        'palette': vis_params['palette'], 'region': roi,
-        'dimensions': 600, 'format': 'png',
-        'crs': 'EPSG:4326' 
-    })
-    response = requests.get(thumb_url)
-    img_pil = Image.open(BytesIO(response.content))
-    
-    # Calculate Extent for Lat/Lon Grid
-    bounds_poly = roi.bounds().getInfo()['coordinates'][0]
-    lons = [p[0] for p in bounds_poly]
-    lats = [p[1] for p in bounds_poly]
-    extent = [min(lons), max(lons), min(lats), max(lats)]
-    
-    fig, ax = plt.subplots(figsize=(10, 10), dpi=600, facecolor='#050509')
-    ax.set_facecolor('#050509')
-    
-    # Plot Image with geographic extent
-    im = ax.imshow(img_pil, extent=extent, aspect='auto')
-    
-    # TITLE
-    ax.set_title(title, fontsize=16, fontweight='bold', pad=20, color='#00f2ff')
-    
-    # LAT/LONG GRID & TICKS
-    ax.tick_params(colors='white', labelcolor='white', labelsize=8)
-    ax.grid(color='white', linestyle='--', linewidth=0.5, alpha=0.2)
-    for spine in ax.spines.values():
-        spine.set_edgecolor('white')
-        spine.set_alpha(0.3)
-    
-    # SCALE BAR
     try:
-        add_scale_bar(ax, extent)
-    except Exception as e:
-        print(f"Scale bar error: {e}")
-
-    # LEGEND / COLORBAR
-    if is_categorical and class_names and 'palette' in vis_params:
-        patches = []
-        for name, color in zip(class_names, vis_params['palette']):
-            patches.append(mpatches.Patch(color=color, label=name))
-        
-        # Place legend outside or neatly inside
-        legend = ax.legend(handles=patches, loc='upper center', bbox_to_anchor=(0.5, -0.05), 
-                           frameon=False, title="Classes", ncol=3)
-        plt.setp(legend.get_title(), color='white', fontweight='bold')
-        for text in legend.get_texts():
-            text.set_color("white")
+        # Fetch image with CRS 4326 to match Lat/Lon extent
+        # We visualize on server side to ensure we get an RGB image, preventing complex compute timeouts
+        if 'palette' in vis_params or 'min' in vis_params:
+            ready_img = image.visualize(**vis_params)
+        else:
+            ready_img = image # Fallback or pre-visualized
             
-    elif cmap_colors:
-        # Continuous Colorbar
-        cmap = mcolors.LinearSegmentedColormap.from_list("custom", cmap_colors)
-        norm = mcolors.Normalize(vmin=vis_params['min'], vmax=vis_params['max'])
-        sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
-        sm.set_array([])
-        cax = fig.add_axes([0.92, 0.15, 0.03, 0.7]) # [left, bottom, width, height]
-        cbar = plt.colorbar(sm, cax=cax)
-        cbar.ax.yaxis.set_tick_params(color='white')
-        cbar.set_label('Value', color='white')
-        plt.setp(plt.getp(cbar.ax.axes, 'yticklabels'), color='white')
-    
-    buf = BytesIO()
-    plt.savefig(buf, format='jpg', bbox_inches='tight', facecolor='#050509')
-    buf.seek(0)
-    plt.close(fig)
-    return buf
+        thumb_url = ready_img.getThumbURL({
+            'region': roi,
+            'dimensions': 600, 'format': 'png',
+            'crs': 'EPSG:4326' 
+        })
+        
+        response = requests.get(thumb_url, timeout=30)
+        
+        # Robust Error Handling
+        if response.status_code != 200:
+            st.error(f"GEE Server Error (Status {response.status_code})")
+            return None
+            
+        # Check if content type is actually an image
+        content_type = response.headers.get('content-type', '')
+        if 'image' not in content_type:
+            st.error(f"GEE Error: {response.text}")
+            return None
+
+        img_pil = Image.open(BytesIO(response.content))
+        
+        # Calculate Extent for Lat/Lon Grid
+        bounds_poly = roi.bounds().getInfo()['coordinates'][0]
+        lons = [p[0] for p in bounds_poly]
+        lats = [p[1] for p in bounds_poly]
+        extent = [min(lons), max(lons), min(lats), max(lats)]
+        
+        fig, ax = plt.subplots(figsize=(10, 10), dpi=600, facecolor='#050509')
+        ax.set_facecolor('#050509')
+        
+        # Plot Image with geographic extent
+        im = ax.imshow(img_pil, extent=extent, aspect='auto')
+        
+        # TITLE
+        ax.set_title(title, fontsize=16, fontweight='bold', pad=20, color='#00f2ff')
+        
+        # LAT/LONG GRID & TICKS
+        ax.tick_params(colors='white', labelcolor='white', labelsize=8)
+        ax.grid(color='white', linestyle='--', linewidth=0.5, alpha=0.2)
+        for spine in ax.spines.values():
+            spine.set_edgecolor('white')
+            spine.set_alpha(0.3)
+        
+        # SCALE BAR
+        try:
+            add_scale_bar(ax, extent)
+        except Exception as e:
+            print(f"Scale bar error: {e}")
+
+        # LEGEND / COLORBAR
+        if is_categorical and class_names and 'palette' in vis_params:
+            patches = []
+            for name, color in zip(class_names, vis_params['palette']):
+                patches.append(mpatches.Patch(color=color, label=name))
+            
+            # Place legend outside or neatly inside
+            legend = ax.legend(handles=patches, loc='upper center', bbox_to_anchor=(0.5, -0.05), 
+                               frameon=False, title="Classes", ncol=3)
+            plt.setp(legend.get_title(), color='white', fontweight='bold')
+            for text in legend.get_texts():
+                text.set_color("white")
+                
+        elif cmap_colors and 'min' in vis_params:
+            # Continuous Colorbar
+            cmap = mcolors.LinearSegmentedColormap.from_list("custom", cmap_colors)
+            norm = mcolors.Normalize(vmin=vis_params['min'], vmax=vis_params['max'])
+            sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
+            sm.set_array([])
+            cax = fig.add_axes([0.92, 0.15, 0.03, 0.7]) # [left, bottom, width, height]
+            cbar = plt.colorbar(sm, cax=cax)
+            cbar.ax.yaxis.set_tick_params(color='white')
+            cbar.set_label('Value', color='white')
+            plt.setp(plt.getp(cbar.ax.axes, 'yticklabels'), color='white')
+        
+        buf = BytesIO()
+        plt.savefig(buf, format='jpg', bbox_inches='tight', facecolor='#050509')
+        buf.seek(0)
+        plt.close(fig)
+        return buf
+        
+    except UnidentifiedImageError:
+        st.error("Error: GEE returned a text error instead of an image. The computation region might be too large or complex.")
+        return None
+    except Exception as e:
+        st.error(f"Map Generation Error: {e}")
+        return None
 
 # --- 5. SIDEBAR (CONTROL PANEL) ---
 with st.sidebar:
@@ -719,7 +745,8 @@ else:
                 if st.button("📷 Render Map (JPG)", use_container_width=True):
                     with st.spinner("Rendering..."):
                         buf = generate_static_map_display(final_img, roi, vis, f"{p['idx']} | {sel_date}", cmap_colors=p['palette'])
-                        st.download_button("⬇️ Save Image", buf, f"Ni30_Map_{sel_date}.jpg", "image/jpeg", use_container_width=True)
+                        if buf:
+                            st.download_button("⬇️ Save Image", buf, f"Ni30_Map_{sel_date}.jpg", "image/jpeg", use_container_width=True)
                 st.markdown('</div>', unsafe_allow_html=True)
 
             with col_map:
@@ -812,7 +839,8 @@ else:
                                 dw_image, roi, dw_vis, map_title, 
                                 is_categorical=True, class_names=dw_names
                             )
-                            st.download_button("⬇️ Save Image", buf, "Ni30_DW_LULC.jpg", "image/jpeg", use_container_width=True)
+                            if buf:
+                                st.download_button("⬇️ Save Image", buf, "Ni30_DW_LULC.jpg", "image/jpeg", use_container_width=True)
                     st.markdown('</div>', unsafe_allow_html=True)
 
         # --- BRANCH B: CUSTOM TRAINING (ANN, RF, SVM) ---
@@ -960,7 +988,8 @@ else:
                                     lulc_class, roi, vis_params, map_title, 
                                     is_categorical=True, class_names=class_names
                                 )
-                                st.download_button("⬇️ Save Image", buf, "Ni30_LULC.jpg", "image/jpeg", use_container_width=True)
+                                if buf:
+                                    st.download_button("⬇️ Save Image", buf, "Ni30_LULC.jpg", "image/jpeg", use_container_width=True)
                         st.markdown('</div>', unsafe_allow_html=True)
                 else:
                     st.error("No imagery to classify.")
@@ -1079,7 +1108,8 @@ else:
                                      remapped, roi, vis_remap, map_title, 
                                      is_categorical=True, class_names=class_names_esa
                                  )
-                                 st.download_button("⬇️ Save Image", buf, "Ni30_Emb_LULC.jpg", "image/jpeg", use_container_width=True)
+                                 if buf:
+                                     st.download_button("⬇️ Save Image", buf, "Ni30_Emb_LULC.jpg", "image/jpeg", use_container_width=True)
                           st.markdown('</div>', unsafe_allow_html=True)
 
                 else:
@@ -1122,7 +1152,8 @@ else:
                                      result, roi, cluster_vis, map_title, 
                                      is_categorical=False # Clusters are cat, but random colors make legend hard
                                  )
-                                 st.download_button("⬇️ Save Image", buf, "Ni30_Clusters.jpg", "image/jpeg", use_container_width=True)
+                                 if buf:
+                                     st.download_button("⬇️ Save Image", buf, "Ni30_Clusters.jpg", "image/jpeg", use_container_width=True)
                     st.markdown('</div>', unsafe_allow_html=True)
 
         with col_map:
@@ -1241,10 +1272,10 @@ else:
                          detected_slides, roi, {'min':0, 'max':1, 'palette':['red']}, 
                          map_title, is_categorical=True, class_names=["Landslide"]
                      )
-                     st.download_button("⬇️ Save Image", buf, "Ni30_Landslide.jpg", "image/jpeg", use_container_width=True)
+                     if buf:
+                         st.download_button("⬇️ Save Image", buf, "Ni30_Landslide.jpg", "image/jpeg", use_container_width=True)
 
                 st.markdown('</div>', unsafe_allow_html=True)
 
         with col_map:
             m.to_streamlit()
-
