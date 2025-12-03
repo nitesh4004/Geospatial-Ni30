@@ -253,7 +253,7 @@ def compute_index(img, platform, index, formula=None):
         if index == 'VH/VV Ratio': return img.select('VH').subtract(img.select('VV')).rename('Ratio')
     return img.select(0)
 
-# --- AUTO SCALE FUNCTION ---
+# --- UPDATED AUTO SCALE FUNCTION ---
 def calculate_dynamic_min_max(image, roi):
     """Calculates 2nd and 98th percentile for auto-scaling.
     Robust version: Renames band temporarily to avoid key errors."""
@@ -282,38 +282,6 @@ def calculate_dynamic_min_max(image, roi):
     except Exception as e:
         print(f"Auto-scale error: {e}")
         return 0.0, 1.0
-
-# --- OTSU ALGORITHM FUNCTION ---
-def otsu_threshold(histogram_dict):
-    """Calculates Otsu threshold from a histogram dictionary."""
-    counts = ee.Array(ee.Dictionary(histogram_dict).get('histogram'))
-    means = ee.Array(ee.Dictionary(histogram_dict).get('bucketMeans'))
-    size = means.length().get([0])
-    total = counts.reduce(ee.Reducer.sum(), [0]).get([0])
-    sum_val = means.multiply(counts).reduce(ee.Reducer.sum(), [0]).get([0])
-    mean = sum_val.divide(total)
-    
-    indices = ee.List.sequence(1, size)
-    
-    # Compute between sum of squares (BSS)
-    def compute_bss(i):
-        aCounts = counts.slice(0, 0, i)
-        aCount = aCounts.reduce(ee.Reducer.sum(), [0]).get([0])
-        aMeans = means.slice(0, 0, i)
-        aMean = aMeans.multiply(aCounts) \
-            .reduce(ee.Reducer.sum(), [0]).get([0]) \
-            .divide(aCount)
-            
-        bCount = total.subtract(aCount)
-        bMean = sum_val.subtract(aCount.multiply(aMean)).divide(bCount)
-        
-        return aCount.multiply(aMean.subtract(mean).pow(2)).add(
-               bCount.multiply(bMean.subtract(mean).pow(2)))
-
-    bss = indices.map(compute_bss)
-    
-    # Return the mean value corresponding to the maximum BSS.
-    return means.sort(bss).get([-1])
 
 # --- LULC SPECIFIC FUNCTIONS ---
 def mask_s2_clouds(image):
@@ -495,7 +463,7 @@ with st.sidebar:
     """, unsafe_allow_html=True)
     
     # MODE SELECTOR
-    mode = st.radio("System Mode", ["Spectral Monitor", "LULC Classifier", "Flood Mapping (SAR-Otsu)", "Geospatial-embeddings-use-cases", "Landslide Detection (SAR)"], index=0)
+    mode = st.radio("System Mode", ["Spectral Monitor", "LULC Classifier", "Geospatial-embeddings-use-cases", "Landslide Detection (SAR)"], index=0)
     st.session_state['mode'] = mode
 
     st.markdown("---")
@@ -512,9 +480,9 @@ with st.sidebar:
                 new_roi = parse_kml(kml.read())
         elif roi_method == "Point & Buffer":
             c1, c2 = st.columns([1, 1])
-            lat = c1.number_input("Lat", 20.59) # India center default
+            lat = c1.number_input("Lat", 20.59)
             lon = c2.number_input("Lon", 78.96)
-            rad = st.number_input("Radius (km)", 10)
+            rad = st.number_input("Radius (km)", 5)
             if lat and lon: new_roi = ee.Geometry.Point([lon, lat]).buffer(rad*1000).bounds()
         elif roi_method == "Manual Coordinates":
             c1, c2 = st.columns(2)
@@ -541,7 +509,6 @@ with st.sidebar:
     embedding_task = "LULC (ESA Labels)"
     pre_start, pre_end, post_start, post_end = None, None, None, None
     slide_thresh, slope_thresh = 2.0, 15
-    otsu_noise_floor = -16
 
     if mode == "Spectral Monitor":
         st.markdown("### 2. Sensor Config")
@@ -644,13 +611,6 @@ with st.sidebar:
             cloud = st.slider("Cloud Masking %", 0, 30, 20)
             split_ratio = st.slider("Train/Validation Split", 0.5, 0.9, 0.8)
 
-    elif mode == "Flood Mapping (SAR-Otsu)":
-        st.markdown("### 2. Algorithm Config")
-        st.info("🌊 Uses Sentinel-1 SAR and Otsu Thresholding to detect floodwater on land.")
-        otsu_noise_floor = st.slider("Noise Floor (dB)", -30, -10, -16, help="Mask out very low backscatter noise")
-        st.caption("Method: Permanent water masked via Hansen Global Forest Change. New water identified by histogram bimodal split.")
-        cloud = 0
-
     elif mode == "Geospatial-embeddings-use-cases":
         st.markdown("### 2. AI Embeddings Task")
         embedding_task = st.selectbox("Select Task", ["LULC (Supervised with ESA Labels)", "Water/Change Detection (Unsupervised)"])
@@ -710,12 +670,6 @@ with st.sidebar:
                     'post_end': post_end.strftime("%Y-%m-%d"),
                     'slide_thresh': slide_thresh,
                     'slope_thresh': slope_thresh
-                })
-            elif mode == "Flood Mapping (SAR-Otsu)":
-                 params.update({
-                    'start': start.strftime("%Y-%m-%d"), 
-                    'end': end.strftime("%Y-%m-%d"),
-                    'otsu_noise_floor': otsu_noise_floor
                 })
             elif mode != "Geospatial-embeddings-use-cases":
                 params.update({
@@ -840,6 +794,7 @@ else:
                         st.session_state['vis_max'] = p98
                         
                         # FORCE UPDATE THE WIDGET KEYS
+                        # This ensures the number inputs in the sidebar reflect the new values immediately
                         st.session_state['vis_min_input'] = p2
                         st.session_state['vis_max_input'] = p98
                         
@@ -1125,158 +1080,7 @@ else:
             m.to_streamlit()
 
     # ==========================================
-    # MODE 3: FLOOD MAPPING (SAR-OTSU)
-    # ==========================================
-    elif p['mode'] == "Flood Mapping (SAR-Otsu)":
-        with st.spinner("🌊 Acquiring Sentinel-1 SAR & Processing Otsu Algorithm..."):
-            
-            # 1. Fetch S1 Image Collection
-            col = ee.ImageCollection('COPERNICUS/S1_GRD') \
-                .filterBounds(roi) \
-                .filterDate(p['start'], p['end']) \
-                .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VV')) \
-                .filter(ee.Filter.eq('instrumentMode', 'IW'))
-            
-            if not st.session_state['dates']:
-                cnt = col.size().getInfo()
-                if cnt > 0:
-                    dates_list = col.aggregate_array('system:time_start').map(
-                        lambda t: ee.Date(t).format('YYYY-MM-dd')).distinct().sort()
-                    st.session_state['dates'] = dates_list.slice(0, 50).getInfo()
-                else:
-                    st.error("⚠️ Signal Lost: No Sentinel-1 images found for this period.")
-                    st.stop()
-            
-        if st.session_state['dates']:
-            dates = st.session_state['dates']
-            col_map, col_data = st.columns([3, 1])
-            
-            with col_data:
-                st.markdown('<div class="glass-card">', unsafe_allow_html=True)
-                st.markdown('<div class="card-label">📅 ACQUISITION DATE</div>', unsafe_allow_html=True)
-                sel_date = st.selectbox("Select Timestamp", dates, index=len(dates)-1, label_visibility="collapsed")
-                st.markdown('</div>', unsafe_allow_html=True)
-                
-                # Fetch Single Image
-                d_s = sel_date
-                d_e = (datetime.strptime(sel_date, "%Y-%m-%d") + timedelta(1)).strftime("%Y-%m-%d")
-                
-                # Get Image and Mosaic (if multiple passes same day)
-                sar_img = col.filterDate(d_s, d_e).mosaic().clip(roi)
-                
-                # --- PRE-PROCESSING STEPS ---
-                # 1. Permanent Water Mask (Hansen)
-                # Removes existing lakes/rivers so we only see FLOOD water
-                hansenImage = ee.Image('UMD/hansen/global_forest_change_2018_v1_6').clip(roi)
-                datamask = hansenImage.select('datamask')
-                mask_water = datamask.eq(1) # 1 = Land, 0 = Water/No Data
-                sar_img_masked = sar_img.updateMask(mask_water)
-                
-                # 2. Speckle Filter
-                sar_smooth = sar_img_masked.focal_median(30, 'circle', 'meters')
-                
-                # 3. Noise Floor Mask
-                mask_noise = sar_smooth.select('VV').gt(p['otsu_noise_floor'])
-                sar_final = sar_smooth.updateMask(mask_noise)
-                
-                # --- OTSU THRESHOLD CALCULATION ---
-                try:
-                    # Compute Histogram
-                    histogram = sar_final.select('VV').reduceRegion(
-                        reducer=ee.Reducer.histogram(255, 2)
-                            .combine('mean', None, True)
-                            .combine('variance', None, True),
-                        geometry=roi,
-                        scale=30,
-                        maxPixels=1e10,
-                        bestEffort=True
-                    )
-                    
-                    # Calculate Threshold using Helper Function
-                    threshold = otsu_threshold(histogram.get('VV_histogram'))
-                    thresh_val = threshold.getInfo()
-                    
-                    # --- CLASSIFICATION ---
-                    # Water is usually very dark (low backscatter) in SAR
-                    flood_mask = sar_final.select('VV').lt(threshold)
-                    # Mask 0 values for transparency
-                    flood_vis = flood_mask.mask(flood_mask)
-                    
-                    # --- STATS ---
-                    st.markdown('<div class="glass-card">', unsafe_allow_html=True)
-                    st.markdown('<div class="card-label">📊 FLOOD METRICS</div>', unsafe_allow_html=True)
-                    
-                    st.markdown(f"""
-                        <div style="margin-bottom:10px;">
-                            <div class="metric-sub">Calculated Threshold</div>
-                            <div class="metric-value">{thresh_val:.2f} dB</div>
-                        </div>
-                    """, unsafe_allow_html=True)
-                    
-                    # Calculate Area
-                    with st.spinner("Calculating Flood Area..."):
-                         flood_area_px = flood_mask.reduceRegion(
-                            reducer=ee.Reducer.sum(),
-                            geometry=roi,
-                            scale=30,
-                            maxPixels=1e10,
-                            bestEffort=True
-                         ).get('VV').getInfo()
-                         
-                         if flood_area_px:
-                             # 30m pixels -> 900sqm -> 0.09 hectares
-                             area_ha = (flood_area_px * 900) / 10000
-                             st.markdown(f"""
-                                <div>
-                                    <div class="metric-sub">Inundated Area</div>
-                                    <div class="metric-value" style="color:#00f2ff;">{area_ha:.2f} ha</div>
-                                </div>
-                            """, unsafe_allow_html=True)
-                    st.markdown('</div>', unsafe_allow_html=True)
-                    
-                    # EXPORT
-                    st.markdown('<div class="glass-card">', unsafe_allow_html=True)
-                    st.markdown('<div class="card-label">💾 EXPORT</div>', unsafe_allow_html=True)
-                    if st.button("☁️ Save Flood Map"):
-                        ee.batch.Export.image.toDrive(
-                            image=flood_mask, 
-                            description=f"FloodMap_Otsu_{sel_date}", 
-                            scale=30, region=roi, folder='GEE_Exports'
-                        ).start()
-                        st.toast("Export Task Started")
-                        
-                    # JPG Render
-                    map_title = st.text_input("Map Title", f"Flood Analysis {sel_date}")
-                    if st.button("📷 Render Map (JPG)"):
-                         with st.spinner("Rendering..."):
-                            # Combine SAR background with blue flood layer
-                            # Note: Static map generation of overlays is tricky in matplotlib
-                            # We will render just the flood mask for clarity or the SAR
-                            buf = generate_static_map_display(
-                                flood_vis, roi, {'palette': 'blue'}, map_title, 
-                                is_categorical=True, class_names=["Flood Water"]
-                            )
-                            if buf:
-                                st.download_button("⬇️ Save Image", buf, "Ni30_Flood.jpg", "image/jpeg", use_container_width=True)
-                    st.markdown('</div>', unsafe_allow_html=True)
-
-                except Exception as e:
-                    st.error(f"Otsu Calculation Error: {e}")
-                    st.caption("Try adjusting ROI or date. Histogram might be empty.")
-
-            with col_map:
-                m = geemap.Map(height=700, basemap="HYBRID")
-                m.centerObject(roi, 12)
-                
-                # Add Layers
-                m.addLayer(sar_img, {'min': -25, 'max': 0}, 'SAR Raw (VV)', False)
-                
-                m.addLayer(sar_final, {'min': -25, 'max': 0}, 'SAR Processed (Filtered)')
-                m.addLayer(flood_vis, {'palette': '0000FF'}, '🌊 Flood Extent (Otsu)')
-                m.to_streamlit()
-
-    # ==========================================
-    # MODE 4: GEOSPATIAL EMBEDDINGS USE CASES
+    # MODE 3: GEOSPATIAL EMBEDDINGS USE CASES
     # ==========================================
     elif p['mode'] == "Geospatial-embeddings-use-cases":
         col_map, col_res = st.columns([3, 1])
@@ -1453,7 +1257,7 @@ else:
             m.to_streamlit()
     
     # ==========================================
-    # MODE 5: LANDSLIDE DETECTION (SAR)
+    # MODE 4: LANDSLIDE DETECTION (SAR)
     # ==========================================
     elif p['mode'] == "Landslide Detection (SAR)":
         col_map, col_res = st.columns([3, 1])
