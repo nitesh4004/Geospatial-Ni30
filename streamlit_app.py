@@ -168,12 +168,34 @@ except Exception:
         st.error(f"⚠️ Authentication Error: {e}")
         st.stop()
 
+# --- SESSION STATE INITIALIZATION ---
 if 'calculated' not in st.session_state: st.session_state['calculated'] = False
 if 'dates' not in st.session_state: st.session_state['dates'] = []
 if 'roi' not in st.session_state: st.session_state['roi'] = None
 if 'mode' not in st.session_state: st.session_state['mode'] = 'Spectral Monitor'
 
-# --- 4. HELPER FUNCTIONS ---
+# Visualization States
+if 'vis_min' not in st.session_state: st.session_state['vis_min'] = 0.0
+if 'vis_max' not in st.session_state: st.session_state['vis_max'] = 1.0
+if 'auto_scale_trigger' not in st.session_state: st.session_state['auto_scale_trigger'] = False
+
+# --- 4. EXTENDED COLOR PALETTES ---
+def get_palettes():
+    return {
+        "Red-Yellow-Green (Vegetation)": ['#d7191c', '#fdae61', '#ffffbf', '#a6d96a', '#1a9641'],
+        "Blue-White-Green (Water/Veg)": ['#0000ff', '#ffffff', '#008000'],
+        "Blue-Yellow-Red (Thermal)": ['#2c7bb6', '#abd9e9', '#ffffbf', '#fdae61', '#d7191c'],
+        "Viridis (Sequential)": ['#440154', '#3b528b', '#21918c', '#5ec962', '#fde725'],
+        "Magma (Sequential)": ['#000004', '#140e36', '#3b0f70', '#641a80', '#8c2981', '#b73779', '#de4968', '#f7705c', '#fe9f6d', '#fcfdbf'],
+        "Inferno (Sequential)": ['#000004', '#160b39', '#420a68', '#6a176e', '#932667', '#bc3754', '#dd513a', '#f37819', '#fca50a', '#f6d746'],
+        "Plasma (Sequential)": ['#0d0887', '#46039f', '#7201a8', '#9c179e', '#bd3786', '#d8576b', '#ed7953', '#fb9f3a', '#fdca26', '#f0f921'],
+        "Turbo (Rainbow Enhanced)": ['#30123b', '#466be3', '#28bbec', '#32f197', '#a2fc3c', '#f2f221', '#fc8961', '#cf2547', '#7a0403'],
+        "Ocean (Water Depth)": ['#ffffd9', '#edf8b1', '#c7e9b4', '#7fcdbb', '#41b6c4', '#1d91c0', '#225ea8', '#253494', '#081d58'],
+        "Terrain (Elevation)": ['#006400', '#32CD32', '#FFFF00', '#DAA520', '#8B4513', '#A0522D', '#D2691E', '#CD853F', '#F4A460', '#DEB887', '#D3D3D3', '#FFFFFF'],
+        "Greyscale": ['#000000', '#FFFFFF']
+    }
+
+# --- 5. HELPER FUNCTIONS ---
 def parse_kml(content):
     try:
         if isinstance(content, bytes): content = content.decode('utf-8')
@@ -231,6 +253,34 @@ def compute_index(img, platform, index, formula=None):
         if index == 'VH/VV Ratio': return img.select('VH').subtract(img.select('VV')).rename('Ratio')
     return img.select(0)
 
+# --- AUTO SCALE FUNCTION ---
+def calculate_dynamic_min_max(image, roi, scale=30):
+    """Calculates 2nd and 98th percentile for auto-scaling."""
+    try:
+        # Use a reducer to get percentiles (avoids outliers)
+        # Note: 'bestEffort=True' allows GEE to adjust scale if too many pixels
+        stats = image.reduceRegion(
+            reducer=ee.Reducer.percentile([2, 98]),
+            geometry=roi,
+            scale=scale,
+            maxPixels=1e9,
+            bestEffort=True
+        ).getInfo()
+        
+        # Get the first band's name (assuming single band visualization mostly)
+        band_name = image.bandNames().get(0).getInfo()
+        
+        p2 = stats.get(f'{band_name}_p2')
+        p98 = stats.get(f'{band_name}_p98')
+        
+        if p2 is None or p98 is None:
+            return 0, 1 # Fallback
+            
+        return float(p2), float(p98)
+    except Exception as e:
+        print(f"Auto-scale error: {e}")
+        return 0, 1
+
 # --- LULC SPECIFIC FUNCTIONS ---
 def mask_s2_clouds(image):
     qa = image.select('QA60')
@@ -259,22 +309,12 @@ def add_lulc_indices(image):
     return image.addBands([ndvi, evi, gndvi, ndwi, ndmi])
 
 def calculate_area_by_class(image, region, scale, class_names=None):
-    """
-    Calculates the area of each class in hectares and returns a DataFrame.
-    """
-    # Create an area image (pixel area in square meters)
     area_image = ee.Image.pixelArea().addBands(image)
-    
-    # Reduce region to get sum of areas per class group
-    # We use group(1) because band 0 is area, band 1 is the class index
     stats = area_image.reduceRegion(
-        reducer=ee.Reducer.sum().group(
-            groupField=1, 
-            groupName='class_index'
-        ),
+        reducer=ee.Reducer.sum().group(groupField=1, groupName='class_index'),
         geometry=region,
         scale=scale,
-        maxPixels=1e10, # Allow large computations
+        maxPixels=1e10, 
         bestEffort=True
     )
     
@@ -282,43 +322,30 @@ def calculate_area_by_class(image, region, scale, class_names=None):
     data = []
     total_area = 0
     
-    if not groups:
-        return pd.DataFrame()
+    if not groups: return pd.DataFrame()
 
     for item in groups:
         c_idx = int(item['class_index'])
         area_sqm = item['sum']
-        area_ha = area_sqm / 10000.0 # Convert to Hectares
+        area_ha = area_sqm / 10000.0
         total_area += area_ha
         
-        # Determine Class Name
         name = f"Class {c_idx}"
         if class_names:
-            # Check bounds to avoid index errors
-            if 0 <= c_idx < len(class_names):
-                name = class_names[c_idx]
-            else:
-                name = f"Class {c_idx}"
+            if 0 <= c_idx < len(class_names): name = class_names[c_idx]
+            else: name = f"Class {c_idx}"
         
         data.append({"Class": name, "Area (ha)": area_ha})
     
     df = pd.DataFrame(data)
-    
     if not df.empty:
-        # Sort by area descending
         df = df.sort_values(by="Area (ha)", ascending=False)
-        # Add Percentage column
         df["%"] = ((df["Area (ha)"] / total_area) * 100).round(1)
-        # Round Area
         df["Area (ha)"] = df["Area (ha)"].round(2)
         
     return df
 
 def add_scale_bar(ax, bounds):
-    """
-    Adds a scale bar to the matplotlib axes based on bounding box coordinates (WGS84).
-    bounds: [min_lon, min_lat, max_lon, max_lat]
-    """
     min_x, min_y, max_x, max_y = bounds
     center_lat = (min_y + max_y) / 2
     met_per_deg_lat = 111320
@@ -374,7 +401,7 @@ def generate_static_map_display(image, roi, vis_params, title, cmap_colors=None,
         extent = [min(lons), max(lons), min(lats), max(lats)]
         
         fig, ax = plt.subplots(figsize=(10, 10), dpi=600, facecolor='#050509')
-        ax.set_facecolor('#050509')
+        ax.set_facecolor='#050509'
         
         im = ax.imshow(img_pil, extent=extent, aspect='auto')
         ax.set_title(title, fontsize=16, fontweight='bold', pad=20, color='#00f2ff')
@@ -424,7 +451,7 @@ def generate_static_map_display(image, roi, vis_params, title, cmap_colors=None,
         st.error(f"Map Generation Error: {e}")
         return None
 
-# --- 5. SIDEBAR (CONTROL PANEL) ---
+# --- 6. SIDEBAR (CONTROL PANEL) ---
 with st.sidebar:
     st.markdown("""
         <div style="margin-bottom: 20px;">
@@ -488,53 +515,51 @@ with st.sidebar:
         ])
         
         is_optical = "Optical" in platform
-        formula, vmin, vmax, orbit = "", 0, 1, "BOTH"
+        formula, orbit = "", "BOTH"
         
+        # --- SENSOR CONFIG ---
         if is_optical:
             idx = st.selectbox("Spectral Product", ['NDVI', 'GNDVI', 'NDWI (Water)', 'NDMI', '🛠️ Custom (Band Math)'])
             if 'Custom' in idx:
                 def_form = "(B5-B4)/(B5+B4)" if "Landsat" in platform else "(B8-B4)/(B8+B4)"
                 formula = st.text_input("Math Expression", def_form)
-                pal_name = "Viridis"
-            elif 'Water' in idx:
-                vmin, vmax = -0.5, 0.5
-                pal_name = "Blue-White-Green"
-            else:
-                vmin, vmax = 0.0, 0.8
-                pal_name = "Red-Yellow-Green"
-            
-            c1, c2 = st.columns(2)
-            vmin = c1.number_input("Min Thresh", value=vmin)
-            vmax = c2.number_input("Max Thresh", value=vmax)
             cloud = st.slider("Cloud Tolerance %", 0, 30, 10)
         else:
             idx = st.selectbox("Polarization", ['VV', 'VH', 'VH/VV Ratio', '🛠️ Custom (Band Math)'])
             if 'Custom' in idx:
                 formula = st.text_input("Expression", "VH/VV")
-                pal_name = "Viridis"
-            elif 'Ratio' in idx:
-                vmin, vmax = -20.0, 0.0
-                pal_name = "Magma"
-            else:
-                vmin, vmax = -25.0, -5.0
-                pal_name = "Greyscale"
-            
-            c1, c2 = st.columns(2)
-            vmin = c1.number_input("Min dB", value=vmin)
-            vmax = c2.number_input("Max dB", value=vmax)
             orbit = st.radio("Pass Direction", ["DESCENDING", "ASCENDING", "BOTH"])
             cloud = 0
 
-        pal_name = st.selectbox("Color Ramp", ["Red-Yellow-Green", "Blue-White-Green", "Magma", "Viridis", "Greyscale"], index=["Red-Yellow-Green", "Blue-White-Green", "Magma", "Viridis", "Greyscale"].index(pal_name))
+        # --- VISUALIZATION CONTROL (Dynamic) ---
+        st.markdown("### 3. Visualization Control")
         
-        pal_map = {
-            "Red-Yellow-Green": ['#d7191c', '#fdae61', '#ffffbf', '#a6d96a', '#1a9641'],
-            "Blue-White-Green": ['blue', 'white', 'green'],
-            "Magma": ['black', 'purple', 'orange', 'white'],
-            "Viridis": ['#440154', '#3b528b', '#21918c', '#5ec962', '#fde725'],
-            "Greyscale": ['black', 'white']
-        }
-        cur_palette = pal_map.get(pal_name, pal_map["Red-Yellow-Green"])
+        palettes = get_palettes()
+        pal_name = st.selectbox("Color Palette", list(palettes.keys()), index=0)
+        cur_palette = palettes[pal_name]
+        
+        st.caption("Value Range (Stretch)")
+        
+        # Determine defaults if not already set (just once or on reset)
+        if not st.session_state.get('calculated'):
+             if is_optical:
+                 if 'Water' in idx: st.session_state['vis_min'], st.session_state['vis_max'] = -0.5, 0.5
+                 else: st.session_state['vis_min'], st.session_state['vis_max'] = 0.0, 0.8
+             else:
+                 st.session_state['vis_min'], st.session_state['vis_max'] = -25.0, -5.0
+
+        # Manual Inputs linked to Session State
+        c1, c2 = st.columns(2)
+        vmin = c1.number_input("Min", value=st.session_state['vis_min'], key='vis_min_input')
+        vmax = c2.number_input("Max", value=st.session_state['vis_max'], key='vis_max_input')
+        
+        # Sync input with session state
+        st.session_state['vis_min'] = vmin
+        st.session_state['vis_max'] = vmax
+
+        # Auto-Detect Trigger
+        if st.button("⚡ Auto-Detect Min/Max"):
+            st.session_state['auto_scale_trigger'] = True
 
     elif mode == "LULC Classifier": # LULC MODE
         st.markdown("### 2. ML Architecture")
@@ -660,7 +685,8 @@ with st.sidebar:
             if mode == "Spectral Monitor":
                 params.update({
                     'platform': platform, 'idx': idx, 'formula': formula, 
-                    'orbit': orbit, 'vmin': vmin, 'vmax': vmax, 'palette': cur_palette
+                    'orbit': orbit, 'palette': cur_palette
+                    # Note: vmin/vmax are pulled from session state dynamically in the main loop
                 })
                 
             st.session_state.update(params)
@@ -668,7 +694,7 @@ with st.sidebar:
         else:
             st.error("❌ Error: ROI not defined.")
 
-# --- 6. MAIN CONTENT ---
+# --- 7. MAIN CONTENT ---
 st.markdown("""
 <div class="hud-header">
     <div>
@@ -752,8 +778,20 @@ else:
                 band = 'Custom' if 'Custom' in p['idx'] else p['idx'].split()[0]
                 if 'Ratio' in p['idx']: band = 'Ratio'
                 
+                # Fetch Image
                 final_img = processed.filterDate(d_s, d_e).select(band).median().clip(roi)
-                vis = {'min': p['vmin'], 'max': p['vmax'], 'palette': p['palette']}
+                
+                # --- AUTO DETECT LOGIC ---
+                if st.session_state['auto_scale_trigger']:
+                    with st.spinner("⚡ Auto-detecting optimal range..."):
+                        p2, p98 = calculate_dynamic_min_max(final_img, roi, scale=30 if "Landsat" in p['platform'] else 10)
+                        st.session_state['vis_min'] = p2
+                        st.session_state['vis_max'] = p98
+                        st.session_state['auto_scale_trigger'] = False # Reset trigger
+                        st.rerun() # Refresh to show new sliders
+
+                # Use Current Session State for Viz
+                vis = {'min': st.session_state['vis_min'], 'max': st.session_state['vis_max'], 'palette': p['palette']}
                 
                 st.markdown('<div class="glass-card">', unsafe_allow_html=True)
                 st.markdown('<div class="card-label">💾 DATA EXPORT</div>', unsafe_allow_html=True)
