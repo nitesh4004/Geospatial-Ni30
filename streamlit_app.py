@@ -177,9 +177,9 @@ if 'mode' not in st.session_state: st.session_state['mode'] = 'Spectral Monitor'
 # Visualization States
 if 'vis_min' not in st.session_state: st.session_state['vis_min'] = 0.0
 if 'vis_max' not in st.session_state: st.session_state['vis_max'] = 1.0
-if 'current_idx' not in st.session_state: st.session_state['current_idx'] = ''
+if 'last_vis_key' not in st.session_state: st.session_state['last_vis_key'] = None
 
-# --- 4. EXTENDED COLOR PALETTES & PRESETS ---
+# --- 4. EXTENDED COLOR PALETTES ---
 def get_palettes():
     return {
         "Red-Yellow-Green (Vegetation)": ['#d7191c', '#fdae61', '#ffffbf', '#a6d96a', '#1a9641'],
@@ -194,24 +194,6 @@ def get_palettes():
         "Terrain (Elevation)": ['#006400', '#32CD32', '#FFFF00', '#DAA520', '#8B4513', '#A0522D', '#D2691E', '#CD853F', '#F4A460', '#DEB887', '#D3D3D3', '#FFFFFF'],
         "Greyscale": ['#000000', '#FFFFFF']
     }
-
-# VISUALIZATION PRESETS
-VIS_PRESETS = {
-    'NDVI': {'min': 0.0, 'max': 0.8, 'palette': 'Red-Yellow-Green (Vegetation)'},
-    'GNDVI': {'min': 0.0, 'max': 0.8, 'palette': 'Red-Yellow-Green (Vegetation)'},
-    'NDWI (Water)': {'min': -0.5, 'max': 0.3, 'palette': 'Ocean (Water Depth)'},
-    'NDMI': {'min': -0.4, 'max': 0.4, 'palette': 'Blue-White-Green (Water/Veg)'},
-    'VV': {'min': -25.0, 'max': -5.0, 'palette': 'Greyscale'},
-    'VH': {'min': -30.0, 'max': -10.0, 'palette': 'Greyscale'},
-    'VH/VV Ratio': {'min': 0.3, 'max': 0.8, 'palette': 'Magma (Sequential)'},
-    'Default': {'min': 0.0, 'max': 1.0, 'palette': 'Viridis (Sequential)'}
-}
-
-def get_preset(idx_name):
-    for key in VIS_PRESETS:
-        if key in idx_name:
-            return VIS_PRESETS[key]
-    return VIS_PRESETS['Default']
 
 # --- 5. HELPER FUNCTIONS ---
 def parse_kml(content):
@@ -538,31 +520,27 @@ with st.sidebar:
         # --- VISUALIZATION CONTROL (Dynamic) ---
         st.markdown("### 3. Visualization Settings")
         
-        # Apply Preset Logic if Index Changed
-        if idx != st.session_state['current_idx']:
-            preset = get_preset(idx)
-            st.session_state['vis_min'] = preset['min']
-            st.session_state['vis_max'] = preset['max']
-            # Find palette index in list
-            full_pal_name = preset['palette']
-            pal_keys = list(get_palettes().keys())
-            st.session_state['default_pal_idx'] = pal_keys.index(full_pal_name) if full_pal_name in pal_keys else 0
-            st.session_state['current_idx'] = idx
-
         palettes = get_palettes()
-        pal_name = st.selectbox("Color Palette", list(palettes.keys()), index=st.session_state.get('default_pal_idx', 0))
+        pal_name = st.selectbox("Color Palette", list(palettes.keys()), index=0)
         cur_palette = palettes[pal_name]
         
         st.caption("Value Range (Stretch)")
         
         # Manual Inputs linked to Session State
         c1, c2 = st.columns(2)
-        vmin = c1.number_input("Min", value=float(st.session_state['vis_min']), key='vis_min_input')
-        vmax = c2.number_input("Max", value=float(st.session_state['vis_max']), key='vis_max_input')
+        # We assume values are already in session state, if not we default
+        current_min = float(st.session_state.get('vis_min', 0.0))
+        current_max = float(st.session_state.get('vis_max', 1.0))
         
-        # Sync input with session state variables
-        st.session_state['vis_min'] = vmin
-        st.session_state['vis_max'] = vmax
+        vmin = c1.number_input("Min", value=current_min, key='vis_min_input')
+        vmax = c2.number_input("Max", value=current_max, key='vis_max_input')
+        
+        # Sync input with session state variables manually if they differ 
+        # (This handles the case where user types in the box)
+        if vmin != st.session_state.get('vis_min'):
+            st.session_state['vis_min'] = vmin
+        if vmax != st.session_state.get('vis_max'):
+            st.session_state['vis_max'] = vmax
 
     elif mode == "LULC Classifier": # LULC MODE
         st.markdown("### 2. ML Architecture")
@@ -781,11 +759,29 @@ else:
                 # Calculate Index
                 index_img = compute_index(base_img, p['platform'], p['idx'], p['formula'])
                 
+                # --- AUTO-CALCULATE VIS PARAMS FROM ROI ---
+                # Unique key for current Index+Date combo
+                current_vis_key = f"{p['idx']}_{sel_date}"
+                
+                # Check if we have already calculated stats for this specific image configuration
+                # If not, calculate them now and update the session state variables
+                if st.session_state.get('last_vis_key') != current_vis_key:
+                    with st.spinner("📏 Calculating dynamic stretch from ROI stats..."):
+                        stats = calculate_roi_stats(index_img, roi)
+                        if stats:
+                            # Update the session state variables that feed the sidebar widgets
+                            st.session_state['vis_min'] = stats['min']
+                            st.session_state['vis_max'] = stats['max']
+                            
+                            # Update the tracker so we don't re-calc unless date/index changes
+                            st.session_state['last_vis_key'] = current_vis_key
+                            st.rerun()
+
                 # --- STATISTICS CARD ---
                 st.markdown('<div class="glass-card">', unsafe_allow_html=True)
                 st.markdown(f'<div class="card-label">📊 STATISTICAL ANALYSIS ({p["idx"]})</div>', unsafe_allow_html=True)
                 with st.spinner("Calculating ROI Stats..."):
-                    # Always calc stats on the Index layer
+                    # We calc stats again just for display (fast enough) or could use cached if preferred
                     stats = calculate_roi_stats(index_img, roi)
                     if stats:
                         c_s1, c_s2 = st.columns(2)
