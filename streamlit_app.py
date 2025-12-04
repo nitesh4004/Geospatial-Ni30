@@ -177,9 +177,9 @@ if 'mode' not in st.session_state: st.session_state['mode'] = 'Spectral Monitor'
 # Visualization States
 if 'vis_min' not in st.session_state: st.session_state['vis_min'] = 0.0
 if 'vis_max' not in st.session_state: st.session_state['vis_max'] = 1.0
-if 'auto_scale_trigger' not in st.session_state: st.session_state['auto_scale_trigger'] = False
+if 'current_idx' not in st.session_state: st.session_state['current_idx'] = ''
 
-# --- 4. EXTENDED COLOR PALETTES ---
+# --- 4. EXTENDED COLOR PALETTES & PRESETS ---
 def get_palettes():
     return {
         "Red-Yellow-Green (Vegetation)": ['#d7191c', '#fdae61', '#ffffbf', '#a6d96a', '#1a9641'],
@@ -194,6 +194,25 @@ def get_palettes():
         "Terrain (Elevation)": ['#006400', '#32CD32', '#FFFF00', '#DAA520', '#8B4513', '#A0522D', '#D2691E', '#CD853F', '#F4A460', '#DEB887', '#D3D3D3', '#FFFFFF'],
         "Greyscale": ['#000000', '#FFFFFF']
     }
+
+# VISUALIZATION PRESETS (The Logic Fix)
+VIS_PRESETS = {
+    'NDVI': {'min': 0.0, 'max': 0.8, 'palette': 'Red-Yellow-Green (Vegetation)'},
+    'GNDVI': {'min': 0.0, 'max': 0.8, 'palette': 'Red-Yellow-Green (Vegetation)'},
+    'NDWI (Water)': {'min': -0.5, 'max': 0.3, 'palette': 'Ocean (Water Depth)'},
+    'NDMI': {'min': -0.4, 'max': 0.4, 'palette': 'Blue-White-Green (Water/Veg)'},
+    'VV': {'min': -25.0, 'max': -5.0, 'palette': 'Greyscale'},
+    'VH': {'min': -30.0, 'max': -10.0, 'palette': 'Greyscale'},
+    'VH/VV Ratio': {'min': 0.3, 'max': 0.8, 'palette': 'Magma (Sequential)'},
+    'Default': {'min': 0.0, 'max': 1.0, 'palette': 'Viridis (Sequential)'}
+}
+
+def get_preset(idx_name):
+    # Flexible matching
+    for key in VIS_PRESETS:
+        if key in idx_name:
+            return VIS_PRESETS[key]
+    return VIS_PRESETS['Default']
 
 # --- 5. HELPER FUNCTIONS ---
 def parse_kml(content):
@@ -253,35 +272,38 @@ def compute_index(img, platform, index, formula=None):
         if index == 'VH/VV Ratio': return img.select('VH').subtract(img.select('VV')).rename('Ratio')
     return img.select(0)
 
-# --- UPDATED AUTO SCALE FUNCTION ---
-def calculate_dynamic_min_max(image, roi):
-    """Calculates 2nd and 98th percentile for auto-scaling.
-    Robust version: Renames band temporarily to avoid key errors."""
-    try:
-        # Rename the single band to 'constant' so we know the key name in the result dict
-        temp_img = image.select(0).rename("constant")
+# --- ROI STATISTICS FUNCTION ---
+def calculate_roi_stats(image, roi, scale=30):
+    """Calculates Min, Max, Mean, StdDev for the first band in ROI"""
+    reducer = ee.Reducer.minMax() \
+        .combine(reducer2=ee.Reducer.mean(), sharedInputs=True) \
+        .combine(reducer2=ee.Reducer.stdDev(), sharedInputs=True)
         
-        # Use a reducer to get percentiles (avoids outliers)
-        # Scale is set higher (100m) to make it fast over large ROIs
-        stats = temp_img.reduceRegion(
-            reducer=ee.Reducer.percentile([2, 98]),
+    try:
+        stats = image.reduceRegion(
+            reducer=reducer,
             geometry=roi,
-            scale=100,  # Coarser scale for speed
-            maxPixels=1e13,
+            scale=scale,
+            maxPixels=1e9,
             bestEffort=True
         ).getInfo()
         
-        # Keys will be 'constant_p2' and 'constant_p98' regardless of original band name
-        p2 = stats.get('constant_p2')
-        p98 = stats.get('constant_p98')
+        # Parse keys (they usually come as 'band_min', 'band_max', etc.)
+        # We assume single band image passed here
+        keys = list(stats.keys())
+        if not keys: return None
         
-        if p2 is None or p98 is None:
-            return 0.0, 1.0 # Fallback
-            
-        return float(p2), float(p98)
+        # Helper to find key containing 'mean', 'min' etc
+        res = {}
+        for k in keys:
+            if 'mean' in k: res['mean'] = stats[k]
+            if 'min' in k: res['min'] = stats[k]
+            if 'max' in k: res['max'] = stats[k]
+            if 'stdDev' in k: res['std'] = stats[k]
+        return res
     except Exception as e:
-        print(f"Auto-scale error: {e}")
-        return 0.0, 1.0
+        print(f"Stats Error: {e}")
+        return None
 
 # --- LULC SPECIFIC FUNCTIONS ---
 def mask_s2_clouds(image):
@@ -373,7 +395,7 @@ def add_scale_bar(ax, bounds):
 
 def generate_static_map_display(image, roi, vis_params, title, cmap_colors=None, is_categorical=False, class_names=None):
     try:
-        if 'palette' in vis_params or 'min' in vis_params:
+        if 'palette' in vis_params or 'min' in vis_params or 'bands' in vis_params:
             ready_img = image.visualize(**vis_params)
         else:
             ready_img = image 
@@ -429,7 +451,7 @@ def generate_static_map_display(image, roi, vis_params, title, cmap_colors=None,
             for text in legend.get_texts():
                 text.set_color("white")
                 
-        elif cmap_colors and 'min' in vis_params:
+        elif cmap_colors and 'min' in vis_params and 'bands' not in vis_params:
             cmap = mcolors.LinearSegmentedColormap.from_list("custom", cmap_colors)
             norm = mcolors.Normalize(vmin=vis_params['min'], vmax=vis_params['max'])
             sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
@@ -509,6 +531,7 @@ with st.sidebar:
     embedding_task = "LULC (ESA Labels)"
     pre_start, pre_end, post_start, post_end = None, None, None, None
     slide_thresh, slope_thresh = 2.0, 15
+    viz_layer_mode = "Index/Analytical" # Default
 
     if mode == "Spectral Monitor":
         st.markdown("### 2. Sensor Config")
@@ -526,42 +549,49 @@ with st.sidebar:
                 def_form = "(B5-B4)/(B5+B4)" if "Landsat" in platform else "(B8-B4)/(B8+B4)"
                 formula = st.text_input("Math Expression", def_form)
             cloud = st.slider("Cloud Tolerance %", 0, 30, 10)
+            
+            st.markdown("### 3. Layer Mode")
+            viz_layer_mode = st.radio("Display Mode", ["Index/Analytical", "True Color (RGB)", "False Color (NIR/Red/Green)"])
+
         else:
             idx = st.selectbox("Polarization", ['VV', 'VH', 'VH/VV Ratio', '🛠️ Custom (Band Math)'])
             if 'Custom' in idx:
                 formula = st.text_input("Expression", "VH/VV")
             orbit = st.radio("Pass Direction", ["DESCENDING", "ASCENDING", "BOTH"])
             cloud = 0
+            viz_layer_mode = "Index/Analytical" # SAR doesn't have RGB
 
         # --- VISUALIZATION CONTROL (Dynamic) ---
-        st.markdown("### 3. Visualization Control")
+        st.markdown("### 4. Visualization Settings")
         
+        # Apply Preset Logic if Index Changed
+        if idx != st.session_state['current_idx']:
+            preset = get_preset(idx)
+            st.session_state['vis_min'] = preset['min']
+            st.session_state['vis_max'] = preset['max']
+            # Find palette index in list
+            full_pal_name = preset['palette']
+            pal_keys = list(get_palettes().keys())
+            st.session_state['default_pal_idx'] = pal_keys.index(full_pal_name) if full_pal_name in pal_keys else 0
+            st.session_state['current_idx'] = idx
+
         palettes = get_palettes()
-        pal_name = st.selectbox("Color Palette", list(palettes.keys()), index=0)
+        pal_name = st.selectbox("Color Palette", list(palettes.keys()), index=st.session_state.get('default_pal_idx', 0))
         cur_palette = palettes[pal_name]
         
         st.caption("Value Range (Stretch)")
         
-        # Determine defaults if not already set (just once or on reset)
-        if not st.session_state.get('calculated'):
-             if is_optical:
-                 if 'Water' in idx: st.session_state['vis_min'], st.session_state['vis_max'] = -0.5, 0.5
-                 else: st.session_state['vis_min'], st.session_state['vis_max'] = 0.0, 0.8
-             else:
-                 st.session_state['vis_min'], st.session_state['vis_max'] = -25.0, -5.0
-
         # Manual Inputs linked to Session State
         c1, c2 = st.columns(2)
-        # Use key to bind to session state, allowing programmatic updates
-        vmin = c1.number_input("Min", value=st.session_state['vis_min'], key='vis_min_input')
-        vmax = c2.number_input("Max", value=st.session_state['vis_max'], key='vis_max_input')
+        vmin = c1.number_input("Min", value=float(st.session_state['vis_min']), key='vis_min_input')
+        vmax = c2.number_input("Max", value=float(st.session_state['vis_max']), key='vis_max_input')
         
         # Sync input with session state variables
         st.session_state['vis_min'] = vmin
         st.session_state['vis_max'] = vmax
 
         # Auto-Detect Trigger
-        if st.button("⚡ Auto-Detect Min/Max"):
+        if st.button("⚡ Auto-Detect Min/Max from ROI"):
             st.session_state['auto_scale_trigger'] = True
 
     elif mode == "LULC Classifier": # LULC MODE
@@ -688,7 +718,7 @@ with st.sidebar:
             if mode == "Spectral Monitor":
                 params.update({
                     'platform': platform, 'idx': idx, 'formula': formula, 
-                    'orbit': orbit, 'palette': cur_palette
+                    'orbit': orbit, 'palette': cur_palette, 'layer_mode': viz_layer_mode
                     # Note: vmin/vmax are pulled from session state dynamically in the main loop
                 })
                 
@@ -738,22 +768,19 @@ else:
                 col = (ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
                        .filterBounds(roi).filterDate(p['start'], p['end'])
                        .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', p['cloud'])))
-                processed = col.map(lambda img: img.addBands(compute_index(img, p['platform'], p['idx'], p['formula'])))
+                # We do NOT reduce to single band here yet, need RGB later
+                processed = col 
             elif "Landsat" in p['platform']:
                 col_raw = ee.ImageCollection("LANDSAT/LC09/C02/T1_L2") if "Landsat 9" in p['platform'] else ee.ImageCollection("LANDSAT/LC08/C02/T1_L2")
                 col = (col_raw.filterBounds(roi).filterDate(p['start'], p['end'])
                        .filter(ee.Filter.lt('CLOUD_COVER', p['cloud'])))
-                def process_landsat_step(img):
-                    scaled = preprocess_landsat(img)
-                    renamed = rename_landsat_bands(scaled)
-                    return renamed.addBands(compute_index(renamed, p['platform'], p['idx'], p['formula']))
-                processed = col.map(process_landsat_step)
+                processed = col.map(preprocess_landsat).map(rename_landsat_bands)
             else:
                 col = (ee.ImageCollection('COPERNICUS/S1_GRD')
                        .filterBounds(roi).filterDate(p['start'], p['end'])
                        .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VV')))
                 if p['orbit'] != "BOTH": col = col.filter(ee.Filter.eq('orbitProperties_pass', p['orbit']))
-                processed = col.map(lambda img: img.addBands(compute_index(img, p['platform'], p['idx'], p['formula'])))
+                processed = col
             
             if not st.session_state['dates']:
                 cnt = processed.size().getInfo()
@@ -778,43 +805,77 @@ else:
 
                 d_s = sel_date
                 d_e = (datetime.strptime(sel_date, "%Y-%m-%d") + timedelta(1)).strftime("%Y-%m-%d")
-                band = 'Custom' if 'Custom' in p['idx'] else p['idx'].split()[0]
-                if 'Ratio' in p['idx']: band = 'Ratio'
                 
-                # Fetch Image
-                final_img = processed.filterDate(d_s, d_e).select(band).median().clip(roi)
+                # Fetch Base Image (Mosaic for the day)
+                base_img = processed.filterDate(d_s, d_e).mosaic().clip(roi)
+                
+                # Calculate Index
+                index_img = compute_index(base_img, p['platform'], p['idx'], p['formula'])
                 
                 # --- AUTO DETECT LOGIC (FIXED) ---
-                if st.session_state['auto_scale_trigger']:
+                if st.session_state.get('auto_scale_trigger', False):
                     with st.spinner("⚡ Auto-detecting optimal range..."):
-                        p2, p98 = calculate_dynamic_min_max(final_img, roi)
-                        
-                        # Update session state values
-                        st.session_state['vis_min'] = p2
-                        st.session_state['vis_max'] = p98
-                        
-                        # FORCE UPDATE THE WIDGET KEYS
-                        # This ensures the number inputs in the sidebar reflect the new values immediately
-                        st.session_state['vis_min_input'] = p2
-                        st.session_state['vis_max_input'] = p98
-                        
-                        st.session_state['auto_scale_trigger'] = False # Reset trigger
-                        st.rerun() # Refresh to update sidebar widgets
+                        # Calculate stats on the INDEX image, not the RGB
+                        stats = calculate_roi_stats(index_img, roi)
+                        if stats:
+                            st.session_state['vis_min'] = stats['min']
+                            st.session_state['vis_max'] = stats['max']
+                            
+                            st.session_state['vis_min_input'] = stats['min']
+                            st.session_state['vis_max_input'] = stats['max']
+                            
+                            st.session_state['auto_scale_trigger'] = False
+                            st.rerun()
 
-                # Use Current Session State for Viz
-                vis = {'min': st.session_state['vis_min'], 'max': st.session_state['vis_max'], 'palette': p['palette']}
+                # --- STATISTICS CARD ---
+                st.markdown('<div class="glass-card">', unsafe_allow_html=True)
+                st.markdown(f'<div class="card-label">📊 STATISTICAL ANALYSIS ({p["idx"]})</div>', unsafe_allow_html=True)
+                with st.spinner("Calculating ROI Stats..."):
+                    # Always calc stats on the Index layer
+                    stats = calculate_roi_stats(index_img, roi)
+                    if stats:
+                        c_s1, c_s2 = st.columns(2)
+                        c_s1.markdown(f"**Mean:** {stats['mean']:.3f}")
+                        c_s1.markdown(f"**Std:** {stats['std']:.3f}")
+                        c_s2.markdown(f"**Min:** {stats['min']:.3f}")
+                        c_s2.markdown(f"**Max:** {stats['max']:.3f}")
+                    else:
+                        st.warning("Stats unavailable")
+                st.markdown('</div>', unsafe_allow_html=True)
+
+                # --- LAYER PREPARATION ---
+                # Determine what to show on map
+                layer_to_show = index_img
+                vis_params = {'min': st.session_state['vis_min'], 'max': st.session_state['vis_max'], 'palette': p['palette']}
+                legend_title = p['idx']
                 
+                if p['layer_mode'] == "True Color (RGB)" and is_optical:
+                    # RGB Vis
+                    layer_to_show = base_img.select(['B4', 'B3', 'B2'])
+                    vis_params = {'min': 0.0, 'max': 0.3} # Standard optical reflectance
+                    legend_title = "True Color (RGB)"
+                elif p['layer_mode'] == "False Color (NIR/Red/Green)" and is_optical:
+                    # NIR False Color
+                    layer_to_show = base_img.select(['B8', 'B4', 'B3']) if "Sentinel" in p['platform'] else base_img.select(['B5', 'B4', 'B3'])
+                    vis_params = {'min': 0.0, 'max': 0.4}
+                    legend_title = "False Color (NIR)"
+                
+                # --- DOWNLOAD & MAP ---
                 st.markdown('<div class="glass-card">', unsafe_allow_html=True)
                 st.markdown('<div class="card-label">💾 DATA EXPORT</div>', unsafe_allow_html=True)
                 try:
-                    url = final_img.getDownloadURL({'scale': 30 if "Landsat" in p['platform'] else 10, 'region': roi, 'name': f"{band}_{sel_date}"})
-                    st.markdown(f"<a href='{url}' style='color:#00f2ff; text-decoration:none;'>🔗 Download GeoTIFF</a>", unsafe_allow_html=True)
+                    url = index_img.getDownloadURL({'scale': 30 if "Landsat" in p['platform'] else 10, 'region': roi, 'name': f"{p['idx']}_{sel_date}"})
+                    st.markdown(f"<a href='{url}' style='color:#00f2ff; text-decoration:none;'>🔗 Download GeoTIFF ({p['idx']})</a>", unsafe_allow_html=True)
                 except: st.caption("Region too large for instant link.")
                 
                 st.markdown("---")
                 if st.button("📷 Render Map (JPG)", use_container_width=True):
                     with st.spinner("Rendering..."):
-                        buf = generate_static_map_display(final_img, roi, vis, f"{p['idx']} | {sel_date}", cmap_colors=p['palette'])
+                        buf = generate_static_map_display(
+                            layer_to_show, roi, vis_params, 
+                            f"{legend_title} | {sel_date}", 
+                            cmap_colors=p['palette'] if 'palette' in vis_params else None
+                        )
                         if buf:
                             st.download_button("⬇️ Save Image", buf, f"Ni30_Map_{sel_date}.jpg", "image/jpeg", use_container_width=True)
                 st.markdown('</div>', unsafe_allow_html=True)
@@ -822,8 +883,12 @@ else:
             with col_map:
                 m = geemap.Map(height=700, basemap="HYBRID")
                 m.centerObject(roi, 13)
-                m.addLayer(final_img, vis, f"{p['idx']} ({sel_date})")
-                m.add_colorbar(vis, label=p['idx'], layer_name="Legend")
+                m.addLayer(layer_to_show, vis_params, legend_title)
+                
+                # Only add colorbar if we are showing the index layer (RGB doesn't use colorbar)
+                if p['layer_mode'] == "Index/Analytical":
+                    m.add_colorbar(vis_params, label=p['idx'], layer_name="Legend")
+                
                 m.to_streamlit()
 
     # ==========================================
@@ -891,9 +956,9 @@ else:
                     
                     st.markdown('<div class="card-label">📊 AREA STATS</div>', unsafe_allow_html=True)
                     with st.spinner("Calculating areas..."):
-                         df_area = calculate_area_by_class(dw_image, roi, 10, dw_names)
-                         if not df_area.empty:
-                             st.dataframe(df_area, hide_index=True, use_container_width=True)
+                          df_area = calculate_area_by_class(dw_image, roi, 10, dw_names)
+                          if not df_area.empty:
+                              st.dataframe(df_area, hide_index=True, use_container_width=True)
                     
                     st.markdown("---")
                     st.markdown('<div class="card-label">💾 EXPORT RESULT</div>', unsafe_allow_html=True)
@@ -974,8 +1039,6 @@ else:
                         
                         proxy_name = "Visual Proxy (Random Forest)"
                         # Train proxy for map
-                        features = [ee.Feature(None, {k: row[k] for k in input_bands + ['class_val']}) for i, row in df.iterrows()]
-                        # Fix for Feature creation
                         features = []
                         for i, row in df.iterrows():
                              features.append(ee.Feature(None, {
@@ -1234,9 +1297,9 @@ else:
                     
                     st.markdown('<div class="card-label">📊 CLUSTER AREA</div>', unsafe_allow_html=True)
                     with st.spinner("Calculating areas..."):
-                         df_area = calculate_area_by_class(result, roi, 20, [f"Cluster {i}" for i in range(n_clusters)])
-                         if not df_area.empty:
-                             st.dataframe(df_area, hide_index=True, use_container_width=True)
+                          df_area = calculate_area_by_class(result, roi, 20, [f"Cluster {i}" for i in range(n_clusters)])
+                          if not df_area.empty:
+                              st.dataframe(df_area, hide_index=True, use_container_width=True)
                     
                     st.markdown("---")
                     
