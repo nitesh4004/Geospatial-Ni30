@@ -174,37 +174,26 @@ if 'dates' not in st.session_state: st.session_state['dates'] = []
 if 'roi' not in st.session_state: st.session_state['roi'] = None
 if 'mode' not in st.session_state: st.session_state['mode'] = 'Spectral Monitor'
 
-# Visualization States
+# Visualization States - Defaults
 if 'vis_min' not in st.session_state: st.session_state['vis_min'] = 0.0
 if 'vis_max' not in st.session_state: st.session_state['vis_max'] = 1.0
-if 'current_idx' not in st.session_state: st.session_state['current_idx'] = ''
-if 'current_palette_name' not in st.session_state: st.session_state['current_palette_name'] = 'Custom NDVI'
+if 'last_calc_key' not in st.session_state: st.session_state['last_calc_key'] = None
 
-# --- 4. EXTENDED COLOR PALETTES & PRESETS ---
+# --- 4. EXTENDED COLOR PALETTES ---
 def get_palettes():
-    # Define exact hex codes from the user request and standard scientific palettes
     return {
-        "Custom NDVI": ['#000000', '#a50026', '#d73027', '#f46d43', '#fdae61', '#fee08b', '#ffffbf', '#d9ef8b', '#a6d96a', '#66bd63', '#1a9850', '#006837'],
-        "Standard NDWI (Water)": ['#f7fbff', '#deebf7', '#c6dbef', '#9ecae1', '#6baed6', '#4292c6', '#2171b5', '#08519c', '#08306b'], # Light to Dark Blue
-        "Standard NDMI (Moisture)": ['#d73027', '#fc8d59', '#fee090', '#ffffbf', '#e0f3f8', '#91bfdb', '#4575b4'], # Red (Dry) -> Blue (Wet)
-        "Inferno (Thermal/SAR)": ['#000004', '#160b39', '#420a68', '#6a176e', '#932667', '#bc3754', '#dd513a', '#f37819', '#fca50a', '#f6d746'],
-        "Red-Yellow-Green": ['#d7191c', '#fdae61', '#ffffbf', '#a6d96a', '#1a9641'],
-        "Viridis": ['#440154', '#3b528b', '#21918c', '#5ec962', '#fde725'],
-        "Magma": ['#000004', '#140e36', '#3b0f70', '#641a80', '#8c2981', '#b73779', '#de4968', '#f7705c', '#fe9f6d', '#fcfdbf'],
+        "Red-Yellow-Green (Vegetation)": ['#d7191c', '#fdae61', '#ffffbf', '#a6d96a', '#1a9641'],
+        "Blue-White-Green (Water/Veg)": ['#0000ff', '#ffffff', '#008000'],
+        "Blue-Yellow-Red (Thermal)": ['#2c7bb6', '#abd9e9', '#ffffbf', '#fdae61', '#d7191c'],
+        "Viridis (Sequential)": ['#440154', '#3b528b', '#21918c', '#5ec962', '#fde725'],
+        "Magma (Sequential)": ['#000004', '#140e36', '#3b0f70', '#641a80', '#8c2981', '#b73779', '#de4968', '#f7705c', '#fe9f6d', '#fcfdbf'],
+        "Inferno (Sequential)": ['#000004', '#160b39', '#420a68', '#6a176e', '#932667', '#bc3754', '#dd513a', '#f37819', '#fca50a', '#f6d746'],
+        "Plasma (Sequential)": ['#0d0887', '#46039f', '#7201a8', '#9c179e', '#bd3786', '#d8576b', '#ed7953', '#fb9f3a', '#fdca26', '#f0f921'],
+        "Turbo (Rainbow Enhanced)": ['#30123b', '#466be3', '#28bbec', '#32f197', '#a2fc3c', '#f2f221', '#fc8961', '#cf2547', '#7a0403'],
+        "Ocean (Water Depth)": ['#ffffd9', '#edf8b1', '#c7e9b4', '#7fcdbb', '#41b6c4', '#1d91c0', '#225ea8', '#253494', '#081d58'],
+        "Terrain (Elevation)": ['#006400', '#32CD32', '#FFFF00', '#DAA520', '#8B4513', '#A0522D', '#D2691E', '#CD853F', '#F4A460', '#DEB887', '#D3D3D3', '#FFFFFF'],
         "Greyscale": ['#000000', '#FFFFFF']
     }
-
-# --- SMART VISUALIZATION PRESETS ---
-# Automatically applied when index changes
-INDEX_PRESETS = {
-    'NDVI': {'min': -0.2, 'max': 1.0, 'palette_name': 'Custom NDVI'},
-    'GNDVI': {'min': -0.2, 'max': 1.0, 'palette_name': 'Red-Yellow-Green'},
-    'NDWI (Water)': {'min': -0.5, 'max': 0.5, 'palette_name': 'Standard NDWI (Water)'},
-    'NDMI': {'min': -0.8, 'max': 0.8, 'palette_name': 'Standard NDMI (Moisture)'},
-    'VV': {'min': -25.0, 'max': -5.0, 'palette_name': 'Inferno (Thermal/SAR)'},
-    'VH': {'min': -30.0, 'max': -10.0, 'palette_name': 'Inferno (Thermal/SAR)'},
-    'VH/VV Ratio': {'min': 0.0, 'max': 1.0, 'palette_name': 'Magma'},
-}
 
 # --- 5. HELPER FUNCTIONS ---
 def parse_kml(content):
@@ -264,37 +253,46 @@ def compute_index(img, platform, index, formula=None):
         if index == 'VH/VV Ratio': return img.select('VH').subtract(img.select('VV')).rename('Ratio')
     return img.select(0)
 
-# --- ROI STATISTICS FUNCTION ---
-def calculate_roi_stats(image, roi, scale=30):
-    """Calculates Min, Max, Mean, StdDev for the first band in ROI"""
-    reducer = ee.Reducer.minMax() \
-        .combine(reducer2=ee.Reducer.mean(), sharedInputs=True) \
-        .combine(reducer2=ee.Reducer.stdDev(), sharedInputs=True)
-        
+# --- STATS CALCULATION (Dynamic Stretch) ---
+def calculate_dynamic_stretch(image, roi, scale=30):
+    """Calculates 2nd and 98th percentile for optimal stretching"""
     try:
+        # Reduce region to get percentiles (avoids outliers better than Min/Max)
         stats = image.reduceRegion(
-            reducer=reducer,
+            reducer=ee.Reducer.percentile([2, 98]),
             geometry=roi,
             scale=scale,
             maxPixels=1e9,
             bestEffort=True
         ).getInfo()
         
-        # Parse keys (they usually come as 'band_min', 'band_max', etc.)
-        keys = list(stats.keys())
-        if not keys: return None
-        
-        # Helper to find key containing 'mean', 'min' etc
+        # Keys come back as 'band_p2', 'band_p98'. We need to extract them regardless of band name
+        vals = list(stats.values())
+        if len(vals) >= 2:
+            return min(vals), max(vals)
+        return 0.0, 1.0 # Fallback
+    except Exception as e:
+        print(f"Stats Error: {e}")
+        return 0.0, 1.0
+
+# --- ROI STATISTICS FUNCTION (For Display) ---
+def calculate_roi_stats_display(image, roi, scale=30):
+    reducer = ee.Reducer.minMax() \
+        .combine(reducer2=ee.Reducer.mean(), sharedInputs=True) \
+        .combine(reducer2=ee.Reducer.stdDev(), sharedInputs=True)
+    try:
+        stats = image.reduceRegion(
+            reducer=reducer, geometry=roi, scale=scale, maxPixels=1e9, bestEffort=True
+        ).getInfo()
         res = {}
+        keys = list(stats.keys())
         for k in keys:
             if 'mean' in k: res['mean'] = stats[k]
             if 'min' in k: res['min'] = stats[k]
             if 'max' in k: res['max'] = stats[k]
             if 'stdDev' in k: res['std'] = stats[k]
         return res
-    except Exception as e:
-        print(f"Stats Error: {e}")
-        return None
+    except: return None
 
 # --- LULC SPECIFIC FUNCTIONS ---
 def mask_s2_clouds(image):
@@ -551,53 +549,23 @@ with st.sidebar:
         # --- VISUALIZATION CONTROL (Dynamic) ---
         st.markdown("### 3. Visualization Settings")
         
-        # 1. APPLY PRESETS IF INDEX CHANGED
-        # This handles the requirement: "set this color palette for NDVI... and also set for other indices"
-        # It updates the session state variables that the widgets listen to.
-        if idx != st.session_state['current_idx']:
-            if idx in INDEX_PRESETS:
-                preset = INDEX_PRESETS[idx]
-                st.session_state['vis_min'] = preset['min']
-                st.session_state['vis_max'] = preset['max']
-                st.session_state['current_palette_name'] = preset['palette_name']
-            else:
-                # Default fallbacks if no preset found
-                st.session_state['vis_min'] = 0.0
-                st.session_state['vis_max'] = 1.0
-                st.session_state['current_palette_name'] = 'Viridis'
-            
-            st.session_state['current_idx'] = idx
-
-        # 2. RENDER WIDGETS
         palettes = get_palettes()
-        
-        # Find index of current palette in list to set default
-        try:
-            pal_idx = list(palettes.keys()).index(st.session_state['current_palette_name'])
-        except ValueError:
-            pal_idx = 0
-            
-        pal_name = st.selectbox("Color Palette", list(palettes.keys()), index=pal_idx)
+        pal_name = st.selectbox("Color Palette", list(palettes.keys()), index=0)
         cur_palette = palettes[pal_name]
-        
-        # Update session state if user manually changes palette
-        st.session_state['current_palette_name'] = pal_name
         
         st.caption("Value Range (Stretch)")
         
+        # Manual Inputs linked to Session State
+        # We read from session state, defaulting to 0.0/1.0 if not yet set
         c1, c2 = st.columns(2)
-        # Read current values from session state
-        vmin_val = float(st.session_state.get('vis_min', 0.0))
-        vmax_val = float(st.session_state.get('vis_max', 1.0))
         
-        # Widgets update session state automatically via key
-        # But we initialize them with the 'value' param to reflect presets
-        vmin = c1.number_input("Min", value=vmin_val, key='vis_min_input')
-        vmax = c2.number_input("Max", value=vmax_val, key='vis_max_input')
+        # The key logic here allows us to update these widgets from the main script
+        vmin = c1.number_input("Min", value=float(st.session_state['vis_min']), key='vis_min_input')
+        vmax = c2.number_input("Max", value=float(st.session_state['vis_max']), key='vis_max_input')
         
-        # Sync widget changes back to main session state var
-        if vmin != st.session_state['vis_min']: st.session_state['vis_min'] = vmin
-        if vmax != st.session_state['vis_max']: st.session_state['vis_max'] = vmax
+        # Sync: If user manually changes these widgets, update session state
+        st.session_state['vis_min'] = vmin
+        st.session_state['vis_max'] = vmax
 
     elif mode == "LULC Classifier": # LULC MODE
         st.markdown("### 2. ML Architecture")
@@ -816,12 +784,31 @@ else:
                 # Calculate Index
                 index_img = compute_index(base_img, p['platform'], p['idx'], p['formula'])
                 
+                # --- AUTO-CALCULATION LOGIC ---
+                # We construct a unique key for the current configuration (Index + Date + ROI)
+                # If this changes, we calculate new Stats (p2, p98) and update the session state
+                
+                roi_hash = str(roi.getInfo()) # ROI might change slightly
+                current_calc_key = f"{p['idx']}_{sel_date}_{roi_hash}"
+                
+                if st.session_state.get('last_calc_key') != current_calc_key:
+                    with st.spinner("📏 Calculating dynamic stretch based on ROI statistics..."):
+                        p2, p98 = calculate_dynamic_stretch(index_img, roi)
+                        
+                        # Update the SESSION STATE directly
+                        st.session_state['vis_min'] = p2
+                        st.session_state['vis_max'] = p98
+                        st.session_state['last_calc_key'] = current_calc_key
+                        
+                        # RERUN to update the sidebar widgets with these new values
+                        st.rerun()
+
                 # --- STATISTICS CARD ---
                 st.markdown('<div class="glass-card">', unsafe_allow_html=True)
                 st.markdown(f'<div class="card-label">📊 STATISTICAL ANALYSIS ({p["idx"]})</div>', unsafe_allow_html=True)
-                with st.spinner("Calculating ROI Stats..."):
-                    # Always calc stats on the Index layer
-                    stats = calculate_roi_stats(index_img, roi)
+                with st.spinner("Calculating display stats..."):
+                    # This calculates Mean/Std/Min/Max for display (different from the p2/p98 stretch)
+                    stats = calculate_roi_stats_display(index_img, roi)
                     if stats:
                         c_s1, c_s2 = st.columns(2)
                         c_s1.markdown(f"**Mean:** {stats['mean']:.3f}")
@@ -833,7 +820,7 @@ else:
                 st.markdown('</div>', unsafe_allow_html=True)
 
                 # --- LAYER PREPARATION ---
-                vis_params = {'min': st.session_state['vis_min'], 'max': st.session_state['vis_max'], 'palette': cur_palette}
+                vis_params = {'min': st.session_state['vis_min'], 'max': st.session_state['vis_max'], 'palette': p['palette']}
                 
                 # --- DOWNLOAD & MAP ---
                 st.markdown('<div class="glass-card">', unsafe_allow_html=True)
@@ -849,7 +836,7 @@ else:
                         buf = generate_static_map_display(
                             index_img, roi, vis_params, 
                             f"{p['idx']} | {sel_date}", 
-                            cmap_colors=cur_palette if 'palette' in vis_params else None
+                            cmap_colors=p['palette'] if 'palette' in vis_params else None
                         )
                         if buf:
                             st.download_button("⬇️ Save Image", buf, f"Ni30_Map_{sel_date}.jpg", "image/jpeg", use_container_width=True)
