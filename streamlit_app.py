@@ -8,6 +8,7 @@ import requests
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 import matplotlib.patches as mpatches
+import matplotlib.patheffects as PathEffects
 from io import BytesIO
 from PIL import Image, UnidentifiedImageError
 from datetime import datetime, timedelta
@@ -360,14 +361,48 @@ def calculate_area_by_class(image, region, scale, class_names=None):
 
 def generate_static_map_display(image, roi, vis_params, title, cmap_colors=None, is_categorical=False, class_names=None):
     try:
+        # 1. CALCULATE GEOMETRY & ASPECT RATIO
+        # This prevents distortion by adapting the figure size to the ROI shape
+        roi_bounds = roi.bounds().getInfo()['coordinates'][0]
+        lons = [p[0] for p in roi_bounds]
+        lats = [p[1] for p in roi_bounds]
+        
+        min_lon, max_lon = min(lons), max(lons)
+        min_lat, max_lat = min(lats), max(lats)
+        
+        # Calculate center latitude to adjust for longitude distance compression (simple spherical assumption)
+        mid_lat = (min_lat + max_lat) / 2
+        
+        # Dimensions in degrees
+        width_deg = max_lon - min_lon
+        height_deg = max_lat - min_lat
+        
+        # Aspect ratio corrected for latitude (Visual Aspect Ratio)
+        # We want the map to look like it does on a Mercator web map
+        # width_pixels / height_pixels ~ (width_deg * cos(lat)) / height_deg
+        aspect_ratio = (width_deg * np.cos(np.radians(mid_lat))) / height_deg
+        
+        # Set Figure Dimensions (Base width fixed, height adapts)
+        # We ensure height doesn't get too small or too huge
+        fig_width = 12 # inches
+        fig_height = fig_width / aspect_ratio
+        
+        # Clamping height
+        if fig_height > 20: fig_height = 20
+        if fig_height < 4: fig_height = 4
+
+        # 2. PREPARE IMAGE FROM GEE
         if 'palette' in vis_params or 'min' in vis_params:
             ready_img = image.visualize(**vis_params)
         else:
             ready_img = image 
             
+        # Get Thumbnail with increased resolution
+        # We use a larger dimension to ensure quality on variable canvas sizes
         thumb_url = ready_img.getThumbURL({
             'region': roi,
-            'dimensions': 600, 'format': 'png',
+            'dimensions': 1500, 
+            'format': 'png',
             'crs': 'EPSG:4326' 
         })
         
@@ -384,69 +419,80 @@ def generate_static_map_display(image, roi, vis_params, title, cmap_colors=None,
 
         img_pil = Image.open(BytesIO(response.content))
         
-        bounds_poly = roi.bounds().getInfo()['coordinates'][0]
-        lons = [p[0] for p in bounds_poly]
-        lats = [p[1] for p in bounds_poly]
-        extent = [min(lons), max(lons), min(lats), max(lats)]
-        
-        fig, ax = plt.subplots(figsize=(10, 10), dpi=600, facecolor='#050509')
+        # 3. PLOT WITH DYNAMIC SIZE
+        fig, ax = plt.subplots(figsize=(fig_width, fig_height), dpi=300, facecolor='#050509')
         ax.set_facecolor='#050509'
         
-        im = ax.imshow(img_pil, extent=extent, aspect='auto')
-        ax.set_title(title, fontsize=16, fontweight='bold', pad=20, color='#00f2ff')
+        # Use extent to map pixels to coordinates
+        extent = [min_lon, max_lon, min_lat, max_lat]
         
-        ax.tick_params(colors='white', labelcolor='white', labelsize=8)
+        # aspect='auto' fills the figure we manually sized to the correct aspect ratio
+        im = ax.imshow(img_pil, extent=extent, aspect='auto')
+        
+        ax.set_title(title, fontsize=18, fontweight='bold', pad=20, color='#00f2ff')
+        
+        ax.tick_params(colors='white', labelcolor='white', labelsize=10)
         ax.grid(color='white', linestyle='--', linewidth=0.5, alpha=0.2)
         for spine in ax.spines.values():
             spine.set_edgecolor('white')
             spine.set_alpha(0.3)
         
-        # Scale Bar Logic (Simplified)
+        # 4. SCALE BAR LOGIC
         try:
-            # Reusing scale bar logic
-            min_x, min_y, max_x, max_y = extent
-            center_lat = (min_y + max_y) / 2
+            center_lat = (min_lat + max_lat) / 2
             met_per_deg_lon = 111320 * np.cos(np.radians(center_lat))
-            width_deg = max_x - min_x
+            
+            # Target length: 20% of map width
             width_met = width_deg * met_per_deg_lon
             target_len_met = width_met / 5
+            
+            # Round to nice number
             order = 10 ** np.floor(np.log10(target_len_met))
             nice_len_met = round(target_len_met / order) * order
             nice_len_deg = nice_len_met / met_per_deg_lon
+            
             pad_x = width_deg * 0.05
-            pad_y = (max_y - min_y) * 0.05
-            start_x = max_x - pad_x - nice_len_deg
-            start_y = min_y + pad_y
-            rect = mpatches.Rectangle((start_x, start_y), nice_len_deg, (max_y-min_y)*0.008, 
+            pad_y = height_deg * 0.05
+            
+            start_x = max_lon - pad_x - nice_len_deg
+            start_y = min_lat + pad_y
+            
+            # Bar height proportional to map height
+            bar_height = height_deg * 0.015
+            
+            rect = mpatches.Rectangle((start_x, start_y), nice_len_deg, bar_height, 
                                     linewidth=1, edgecolor='white', facecolor='white')
             ax.add_patch(rect)
+            
             label = f"{int(nice_len_met/1000)} km" if nice_len_met >= 1000 else f"{int(nice_len_met)} m"
-            ax.text(start_x + nice_len_deg/2, start_y + (max_y-min_y)*0.02, label, 
-                    color='white', ha='center', va='bottom', fontsize=10, fontweight='bold',
-                    path_effects=[plt.matplotlib.patheffects.withStroke(linewidth=2, foreground="black")])
+            ax.text(start_x + nice_len_deg/2, start_y + bar_height + (height_deg*0.01), label, 
+                    color='white', ha='center', va='bottom', fontsize=12, fontweight='bold',
+                    path_effects=[PathEffects.withStroke(linewidth=2, foreground="black")])
         except:
             pass
         
+        # 5. LEGEND LOGIC
         if is_categorical and class_names and 'palette' in vis_params:
             patches = []
             for name, color in zip(class_names, vis_params['palette']):
                 patches.append(mpatches.Patch(color=color, label=name))
-            legend = ax.legend(handles=patches, loc='upper center', bbox_to_anchor=(0.5, -0.05), 
-                               frameon=False, title="Classes", ncol=3)
-            plt.setp(legend.get_title(), color='white', fontweight='bold')
+            legend = ax.legend(handles=patches, loc='upper center', bbox_to_anchor=(0.5, -0.08), 
+                               frameon=False, title="Classes", ncol=min(len(class_names), 4))
+            plt.setp(legend.get_title(), color='white', fontweight='bold', fontsize=12)
             for text in legend.get_texts():
                 text.set_color("white")
+                text.set_fontsize(10)
                 
         elif cmap_colors and 'min' in vis_params:
             cmap = mcolors.LinearSegmentedColormap.from_list("custom", cmap_colors)
             norm = mcolors.Normalize(vmin=vis_params['min'], vmax=vis_params['max'])
             sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
             sm.set_array([])
-            cax = fig.add_axes([0.92, 0.15, 0.03, 0.7]) 
+            cax = fig.add_axes([0.92, 0.15, 0.02, 0.7]) 
             cbar = plt.colorbar(sm, cax=cax)
             cbar.ax.yaxis.set_tick_params(color='white')
-            cbar.set_label('Value', color='white')
-            plt.setp(plt.getp(cbar.ax.axes, 'yticklabels'), color='white')
+            cbar.set_label('Value', color='white', fontsize=12)
+            plt.setp(plt.getp(cbar.ax.axes, 'yticklabels'), color='white', fontsize=10)
         
         buf = BytesIO()
         plt.savefig(buf, format='jpg', bbox_inches='tight', facecolor='#050509')
