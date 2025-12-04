@@ -411,8 +411,10 @@ def generate_static_map_display(image, roi, vis_params, title, cmap_colors=None,
             spine.set_alpha(0.3)
         
         # Scale Bar Logic (Simplified)
-        width_deg = max_x - min_x if 'max_x' in locals() else extent[1] - extent[0]
-        # (Reusing previous scale bar logic if needed, omitted here for brevity or kept minimal)
+        try:
+            add_scale_bar(ax, extent)
+        except:
+            pass
         
         if is_categorical and class_names and 'palette' in vis_params:
             patches = []
@@ -475,17 +477,22 @@ with st.sidebar:
                 new_roi = parse_kml(kml.read())
         elif roi_method == "Point & Buffer":
             c1, c2 = st.columns([1, 1])
-            lat = c1.number_input("Lat", 20.59)
-            lon = c2.number_input("Lon", 78.96)
-            rad = st.number_input("Radius (km)", 5)
-            if lat and lon: new_roi = ee.Geometry.Point([lon, lat]).buffer(rad*1000).bounds()
+            # High precision coordinates, wide range
+            lat = c1.number_input("Lat", value=20.59, min_value=-90.0, max_value=90.0, format="%.6f")
+            lon = c2.number_input("Lon", value=78.96, min_value=-180.0, max_value=180.0, format="%.6f")
+            # Radius in METERS now, no max limit
+            rad = st.number_input("Radius (meters)", value=5000, min_value=10, step=10)
+            if lat and lon: 
+                new_roi = ee.Geometry.Point([lon, lat]).buffer(rad).bounds()
         elif roi_method == "Manual Coordinates":
             c1, c2 = st.columns(2)
-            min_lon = c1.number_input("Min Lon", 78.0)
-            min_lat = c2.number_input("Min Lat", 20.0)
-            max_lon = c1.number_input("Max Lon", 79.0)
-            max_lat = c2.number_input("Max Lat", 21.0)
-            if min_lon < max_lon: new_roi = ee.Geometry.Rectangle([min_lon, min_lat, max_lon, max_lat])
+            # High precision coordinates
+            min_lon = c1.number_input("Min Lon", value=78.0, min_value=-180.0, max_value=180.0, format="%.6f")
+            min_lat = c2.number_input("Min Lat", value=20.0, min_value=-90.0, max_value=90.0, format="%.6f")
+            max_lon = c1.number_input("Max Lon", value=79.0, min_value=-180.0, max_value=180.0, format="%.6f")
+            max_lat = c2.number_input("Max Lat", value=21.0, min_value=-90.0, max_value=90.0, format="%.6f")
+            if min_lon < max_lon and min_lat < max_lat: 
+                new_roi = ee.Geometry.Rectangle([min_lon, min_lat, max_lon, max_lat])
 
         if new_roi:
             if st.session_state['roi'] is None or new_roi.getInfo() != st.session_state['roi'].getInfo():
