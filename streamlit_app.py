@@ -174,10 +174,10 @@ if 'dates' not in st.session_state: st.session_state['dates'] = []
 if 'roi' not in st.session_state: st.session_state['roi'] = None
 if 'mode' not in st.session_state: st.session_state['mode'] = 'Spectral Monitor'
 
-# Visualization States
+# Visualization States - Defaults
 if 'vis_min' not in st.session_state: st.session_state['vis_min'] = 0.0
 if 'vis_max' not in st.session_state: st.session_state['vis_max'] = 1.0
-if 'last_vis_key' not in st.session_state: st.session_state['last_vis_key'] = None
+if 'last_calc_key' not in st.session_state: st.session_state['last_calc_key'] = None
 
 # --- 4. EXTENDED COLOR PALETTES ---
 def get_palettes():
@@ -253,37 +253,46 @@ def compute_index(img, platform, index, formula=None):
         if index == 'VH/VV Ratio': return img.select('VH').subtract(img.select('VV')).rename('Ratio')
     return img.select(0)
 
-# --- ROI STATISTICS FUNCTION ---
-def calculate_roi_stats(image, roi, scale=30):
-    """Calculates Min, Max, Mean, StdDev for the first band in ROI"""
-    reducer = ee.Reducer.minMax() \
-        .combine(reducer2=ee.Reducer.mean(), sharedInputs=True) \
-        .combine(reducer2=ee.Reducer.stdDev(), sharedInputs=True)
-        
+# --- STATS CALCULATION (Dynamic Stretch) ---
+def calculate_dynamic_stretch(image, roi, scale=30):
+    """Calculates 2nd and 98th percentile for optimal stretching"""
     try:
+        # Reduce region to get percentiles (avoids outliers better than Min/Max)
         stats = image.reduceRegion(
-            reducer=reducer,
+            reducer=ee.Reducer.percentile([2, 98]),
             geometry=roi,
             scale=scale,
             maxPixels=1e9,
             bestEffort=True
         ).getInfo()
         
-        # Parse keys (they usually come as 'band_min', 'band_max', etc.)
-        keys = list(stats.keys())
-        if not keys: return None
-        
-        # Helper to find key containing 'mean', 'min' etc
+        # Keys come back as 'band_p2', 'band_p98'. We need to extract them regardless of band name
+        vals = list(stats.values())
+        if len(vals) >= 2:
+            return min(vals), max(vals)
+        return 0.0, 1.0 # Fallback
+    except Exception as e:
+        print(f"Stats Error: {e}")
+        return 0.0, 1.0
+
+# --- ROI STATISTICS FUNCTION (For Display) ---
+def calculate_roi_stats_display(image, roi, scale=30):
+    reducer = ee.Reducer.minMax() \
+        .combine(reducer2=ee.Reducer.mean(), sharedInputs=True) \
+        .combine(reducer2=ee.Reducer.stdDev(), sharedInputs=True)
+    try:
+        stats = image.reduceRegion(
+            reducer=reducer, geometry=roi, scale=scale, maxPixels=1e9, bestEffort=True
+        ).getInfo()
         res = {}
+        keys = list(stats.keys())
         for k in keys:
             if 'mean' in k: res['mean'] = stats[k]
             if 'min' in k: res['min'] = stats[k]
             if 'max' in k: res['max'] = stats[k]
             if 'stdDev' in k: res['std'] = stats[k]
         return res
-    except Exception as e:
-        print(f"Stats Error: {e}")
-        return None
+    except: return None
 
 # --- LULC SPECIFIC FUNCTIONS ---
 def mask_s2_clouds(image):
@@ -394,7 +403,27 @@ def generate_static_map_display(image, roi, vis_params, title, cmap_colors=None,
         
         # Scale Bar Logic (Simplified)
         try:
-            add_scale_bar(ax, extent)
+            # Reusing scale bar logic
+            min_x, min_y, max_x, max_y = extent
+            center_lat = (min_y + max_y) / 2
+            met_per_deg_lon = 111320 * np.cos(np.radians(center_lat))
+            width_deg = max_x - min_x
+            width_met = width_deg * met_per_deg_lon
+            target_len_met = width_met / 5
+            order = 10 ** np.floor(np.log10(target_len_met))
+            nice_len_met = round(target_len_met / order) * order
+            nice_len_deg = nice_len_met / met_per_deg_lon
+            pad_x = width_deg * 0.05
+            pad_y = (max_y - min_y) * 0.05
+            start_x = max_x - pad_x - nice_len_deg
+            start_y = min_y + pad_y
+            rect = mpatches.Rectangle((start_x, start_y), nice_len_deg, (max_y-min_y)*0.008, 
+                                    linewidth=1, edgecolor='white', facecolor='white')
+            ax.add_patch(rect)
+            label = f"{int(nice_len_met/1000)} km" if nice_len_met >= 1000 else f"{int(nice_len_met)} m"
+            ax.text(start_x + nice_len_deg/2, start_y + (max_y-min_y)*0.02, label, 
+                    color='white', ha='center', va='bottom', fontsize=10, fontweight='bold',
+                    path_effects=[plt.matplotlib.patheffects.withStroke(linewidth=2, foreground="black")])
         except:
             pass
         
@@ -527,20 +556,16 @@ with st.sidebar:
         st.caption("Value Range (Stretch)")
         
         # Manual Inputs linked to Session State
+        # We read from session state, defaulting to 0.0/1.0 if not yet set
         c1, c2 = st.columns(2)
-        # We assume values are already in session state, if not we default
-        current_min = float(st.session_state.get('vis_min', 0.0))
-        current_max = float(st.session_state.get('vis_max', 1.0))
         
-        vmin = c1.number_input("Min", value=current_min, key='vis_min_input')
-        vmax = c2.number_input("Max", value=current_max, key='vis_max_input')
+        # The key logic here allows us to update these widgets from the main script
+        vmin = c1.number_input("Min", value=float(st.session_state['vis_min']), key='vis_min_input')
+        vmax = c2.number_input("Max", value=float(st.session_state['vis_max']), key='vis_max_input')
         
-        # Sync input with session state variables manually if they differ 
-        # (This handles the case where user types in the box)
-        if vmin != st.session_state.get('vis_min'):
-            st.session_state['vis_min'] = vmin
-        if vmax != st.session_state.get('vis_max'):
-            st.session_state['vis_max'] = vmax
+        # Sync: If user manually changes these widgets, update session state
+        st.session_state['vis_min'] = vmin
+        st.session_state['vis_max'] = vmax
 
     elif mode == "LULC Classifier": # LULC MODE
         st.markdown("### 2. ML Architecture")
@@ -759,30 +784,31 @@ else:
                 # Calculate Index
                 index_img = compute_index(base_img, p['platform'], p['idx'], p['formula'])
                 
-                # --- AUTO-CALCULATE VIS PARAMS FROM ROI ---
-                # Unique key for current Index+Date combo
-                current_vis_key = f"{p['idx']}_{sel_date}"
+                # --- AUTO-CALCULATION LOGIC ---
+                # We construct a unique key for the current configuration (Index + Date + ROI)
+                # If this changes, we calculate new Stats (p2, p98) and update the session state
                 
-                # Check if we have already calculated stats for this specific image configuration
-                # If not, calculate them now and update the session state variables
-                if st.session_state.get('last_vis_key') != current_vis_key:
-                    with st.spinner("📏 Calculating dynamic stretch from ROI stats..."):
-                        stats = calculate_roi_stats(index_img, roi)
-                        if stats:
-                            # Update the session state variables that feed the sidebar widgets
-                            st.session_state['vis_min'] = stats['min']
-                            st.session_state['vis_max'] = stats['max']
-                            
-                            # Update the tracker so we don't re-calc unless date/index changes
-                            st.session_state['last_vis_key'] = current_vis_key
-                            st.rerun()
+                roi_hash = str(roi.getInfo()) # ROI might change slightly
+                current_calc_key = f"{p['idx']}_{sel_date}_{roi_hash}"
+                
+                if st.session_state.get('last_calc_key') != current_calc_key:
+                    with st.spinner("📏 Calculating dynamic stretch based on ROI statistics..."):
+                        p2, p98 = calculate_dynamic_stretch(index_img, roi)
+                        
+                        # Update the SESSION STATE directly
+                        st.session_state['vis_min'] = p2
+                        st.session_state['vis_max'] = p98
+                        st.session_state['last_calc_key'] = current_calc_key
+                        
+                        # RERUN to update the sidebar widgets with these new values
+                        st.rerun()
 
                 # --- STATISTICS CARD ---
                 st.markdown('<div class="glass-card">', unsafe_allow_html=True)
                 st.markdown(f'<div class="card-label">📊 STATISTICAL ANALYSIS ({p["idx"]})</div>', unsafe_allow_html=True)
-                with st.spinner("Calculating ROI Stats..."):
-                    # We calc stats again just for display (fast enough) or could use cached if preferred
-                    stats = calculate_roi_stats(index_img, roi)
+                with st.spinner("Calculating display stats..."):
+                    # This calculates Mean/Std/Min/Max for display (different from the p2/p98 stretch)
+                    stats = calculate_roi_stats_display(index_img, roi)
                     if stats:
                         c_s1, c_s2 = st.columns(2)
                         c_s1.markdown(f"**Mean:** {stats['mean']:.3f}")
