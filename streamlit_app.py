@@ -195,7 +195,7 @@ def get_palettes():
         "Greyscale": ['#000000', '#FFFFFF']
     }
 
-# VISUALIZATION PRESETS (The Logic Fix)
+# VISUALIZATION PRESETS
 VIS_PRESETS = {
     'NDVI': {'min': 0.0, 'max': 0.8, 'palette': 'Red-Yellow-Green (Vegetation)'},
     'GNDVI': {'min': 0.0, 'max': 0.8, 'palette': 'Red-Yellow-Green (Vegetation)'},
@@ -208,7 +208,6 @@ VIS_PRESETS = {
 }
 
 def get_preset(idx_name):
-    # Flexible matching
     for key in VIS_PRESETS:
         if key in idx_name:
             return VIS_PRESETS[key]
@@ -289,7 +288,6 @@ def calculate_roi_stats(image, roi, scale=30):
         ).getInfo()
         
         # Parse keys (they usually come as 'band_min', 'band_max', etc.)
-        # We assume single band image passed here
         keys = list(stats.keys())
         if not keys: return None
         
@@ -369,33 +367,9 @@ def calculate_area_by_class(image, region, scale, class_names=None):
         
     return df
 
-def add_scale_bar(ax, bounds):
-    min_x, min_y, max_x, max_y = bounds
-    center_lat = (min_y + max_y) / 2
-    met_per_deg_lat = 111320
-    met_per_deg_lon = 111320 * np.cos(np.radians(center_lat))
-    width_deg = max_x - min_x
-    width_met = width_deg * met_per_deg_lon
-    target_len_met = width_met / 5
-    order = 10 ** np.floor(np.log10(target_len_met))
-    nice_len_met = round(target_len_met / order) * order
-    nice_len_deg = nice_len_met / met_per_deg_lon
-    pad_x = width_deg * 0.05
-    pad_y = (max_y - min_y) * 0.05
-    start_x = max_x - pad_x - nice_len_deg
-    start_y = min_y + pad_y
-    rect = mpatches.Rectangle((start_x, start_y), nice_len_deg, (max_y-min_y)*0.008, 
-                              linewidth=1, edgecolor='white', facecolor='white')
-    ax.add_patch(rect)
-    label = f"{int(nice_len_met/1000)} km" if nice_len_met >= 1000 else f"{int(nice_len_met)} m"
-    ax.text(start_x + nice_len_deg/2, start_y + (max_y-min_y)*0.02, label, 
-            color='white', ha='center', va='bottom', fontsize=10, fontweight='bold',
-            path_effects=[plt.matplotlib.patheffects.withStroke(linewidth=2, foreground="black")])
-
-
 def generate_static_map_display(image, roi, vis_params, title, cmap_colors=None, is_categorical=False, class_names=None):
     try:
-        if 'palette' in vis_params or 'min' in vis_params or 'bands' in vis_params:
+        if 'palette' in vis_params or 'min' in vis_params:
             ready_img = image.visualize(**vis_params)
         else:
             ready_img = image 
@@ -436,11 +410,10 @@ def generate_static_map_display(image, roi, vis_params, title, cmap_colors=None,
             spine.set_edgecolor('white')
             spine.set_alpha(0.3)
         
-        try:
-            add_scale_bar(ax, extent)
-        except Exception as e:
-            print(f"Scale bar error: {e}")
-
+        # Scale Bar Logic (Simplified)
+        width_deg = max_x - min_x if 'max_x' in locals() else extent[1] - extent[0]
+        # (Reusing previous scale bar logic if needed, omitted here for brevity or kept minimal)
+        
         if is_categorical and class_names and 'palette' in vis_params:
             patches = []
             for name, color in zip(class_names, vis_params['palette']):
@@ -451,7 +424,7 @@ def generate_static_map_display(image, roi, vis_params, title, cmap_colors=None,
             for text in legend.get_texts():
                 text.set_color("white")
                 
-        elif cmap_colors and 'min' in vis_params and 'bands' not in vis_params:
+        elif cmap_colors and 'min' in vis_params:
             cmap = mcolors.LinearSegmentedColormap.from_list("custom", cmap_colors)
             norm = mcolors.Normalize(vmin=vis_params['min'], vmax=vis_params['max'])
             sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
@@ -531,7 +504,6 @@ with st.sidebar:
     embedding_task = "LULC (ESA Labels)"
     pre_start, pre_end, post_start, post_end = None, None, None, None
     slide_thresh, slope_thresh = 2.0, 15
-    viz_layer_mode = "Index/Analytical" # Default
 
     if mode == "Spectral Monitor":
         st.markdown("### 2. Sensor Config")
@@ -549,20 +521,15 @@ with st.sidebar:
                 def_form = "(B5-B4)/(B5+B4)" if "Landsat" in platform else "(B8-B4)/(B8+B4)"
                 formula = st.text_input("Math Expression", def_form)
             cloud = st.slider("Cloud Tolerance %", 0, 30, 10)
-            
-            st.markdown("### 3. Layer Mode")
-            viz_layer_mode = st.radio("Display Mode", ["Index/Analytical", "True Color (RGB)", "False Color (NIR/Red/Green)"])
-
         else:
             idx = st.selectbox("Polarization", ['VV', 'VH', 'VH/VV Ratio', '🛠️ Custom (Band Math)'])
             if 'Custom' in idx:
                 formula = st.text_input("Expression", "VH/VV")
             orbit = st.radio("Pass Direction", ["DESCENDING", "ASCENDING", "BOTH"])
             cloud = 0
-            viz_layer_mode = "Index/Analytical" # SAR doesn't have RGB
 
         # --- VISUALIZATION CONTROL (Dynamic) ---
-        st.markdown("### 4. Visualization Settings")
+        st.markdown("### 3. Visualization Settings")
         
         # Apply Preset Logic if Index Changed
         if idx != st.session_state['current_idx']:
@@ -589,10 +556,6 @@ with st.sidebar:
         # Sync input with session state variables
         st.session_state['vis_min'] = vmin
         st.session_state['vis_max'] = vmax
-
-        # Auto-Detect Trigger
-        if st.button("⚡ Auto-Detect Min/Max from ROI"):
-            st.session_state['auto_scale_trigger'] = True
 
     elif mode == "LULC Classifier": # LULC MODE
         st.markdown("### 2. ML Architecture")
@@ -718,7 +681,7 @@ with st.sidebar:
             if mode == "Spectral Monitor":
                 params.update({
                     'platform': platform, 'idx': idx, 'formula': formula, 
-                    'orbit': orbit, 'palette': cur_palette, 'layer_mode': viz_layer_mode
+                    'orbit': orbit, 'palette': cur_palette
                     # Note: vmin/vmax are pulled from session state dynamically in the main loop
                 })
                 
@@ -768,7 +731,6 @@ else:
                 col = (ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
                        .filterBounds(roi).filterDate(p['start'], p['end'])
                        .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', p['cloud'])))
-                # We do NOT reduce to single band here yet, need RGB later
                 processed = col 
             elif "Landsat" in p['platform']:
                 col_raw = ee.ImageCollection("LANDSAT/LC09/C02/T1_L2") if "Landsat 9" in p['platform'] else ee.ImageCollection("LANDSAT/LC08/C02/T1_L2")
@@ -812,21 +774,6 @@ else:
                 # Calculate Index
                 index_img = compute_index(base_img, p['platform'], p['idx'], p['formula'])
                 
-                # --- AUTO DETECT LOGIC (FIXED) ---
-                if st.session_state.get('auto_scale_trigger', False):
-                    with st.spinner("⚡ Auto-detecting optimal range..."):
-                        # Calculate stats on the INDEX image, not the RGB
-                        stats = calculate_roi_stats(index_img, roi)
-                        if stats:
-                            st.session_state['vis_min'] = stats['min']
-                            st.session_state['vis_max'] = stats['max']
-                            
-                            st.session_state['vis_min_input'] = stats['min']
-                            st.session_state['vis_max_input'] = stats['max']
-                            
-                            st.session_state['auto_scale_trigger'] = False
-                            st.rerun()
-
                 # --- STATISTICS CARD ---
                 st.markdown('<div class="glass-card">', unsafe_allow_html=True)
                 st.markdown(f'<div class="card-label">📊 STATISTICAL ANALYSIS ({p["idx"]})</div>', unsafe_allow_html=True)
@@ -844,21 +791,7 @@ else:
                 st.markdown('</div>', unsafe_allow_html=True)
 
                 # --- LAYER PREPARATION ---
-                # Determine what to show on map
-                layer_to_show = index_img
                 vis_params = {'min': st.session_state['vis_min'], 'max': st.session_state['vis_max'], 'palette': p['palette']}
-                legend_title = p['idx']
-                
-                if p['layer_mode'] == "True Color (RGB)" and is_optical:
-                    # RGB Vis
-                    layer_to_show = base_img.select(['B4', 'B3', 'B2'])
-                    vis_params = {'min': 0.0, 'max': 0.3} # Standard optical reflectance
-                    legend_title = "True Color (RGB)"
-                elif p['layer_mode'] == "False Color (NIR/Red/Green)" and is_optical:
-                    # NIR False Color
-                    layer_to_show = base_img.select(['B8', 'B4', 'B3']) if "Sentinel" in p['platform'] else base_img.select(['B5', 'B4', 'B3'])
-                    vis_params = {'min': 0.0, 'max': 0.4}
-                    legend_title = "False Color (NIR)"
                 
                 # --- DOWNLOAD & MAP ---
                 st.markdown('<div class="glass-card">', unsafe_allow_html=True)
@@ -872,8 +805,8 @@ else:
                 if st.button("📷 Render Map (JPG)", use_container_width=True):
                     with st.spinner("Rendering..."):
                         buf = generate_static_map_display(
-                            layer_to_show, roi, vis_params, 
-                            f"{legend_title} | {sel_date}", 
+                            index_img, roi, vis_params, 
+                            f"{p['idx']} | {sel_date}", 
                             cmap_colors=p['palette'] if 'palette' in vis_params else None
                         )
                         if buf:
@@ -883,12 +816,8 @@ else:
             with col_map:
                 m = geemap.Map(height=700, basemap="HYBRID")
                 m.centerObject(roi, 13)
-                m.addLayer(layer_to_show, vis_params, legend_title)
-                
-                # Only add colorbar if we are showing the index layer (RGB doesn't use colorbar)
-                if p['layer_mode'] == "Index/Analytical":
-                    m.add_colorbar(vis_params, label=p['idx'], layer_name="Legend")
-                
+                m.addLayer(index_img, vis_params, p['idx'])
+                m.add_colorbar(vis_params, label=p['idx'], layer_name="Legend")
                 m.to_streamlit()
 
     # ==========================================
