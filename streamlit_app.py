@@ -362,7 +362,6 @@ def calculate_area_by_class(image, region, scale, class_names=None):
 def generate_static_map_display(image, roi, vis_params, title, cmap_colors=None, is_categorical=False, class_names=None):
     try:
         # 1. CALCULATE GEOMETRY & ASPECT RATIO
-        # This prevents distortion by adapting the figure size to the ROI shape
         roi_bounds = roi.bounds().getInfo()['coordinates'][0]
         lons = [p[0] for p in roi_bounds]
         lats = [p[1] for p in roi_bounds]
@@ -370,24 +369,15 @@ def generate_static_map_display(image, roi, vis_params, title, cmap_colors=None,
         min_lon, max_lon = min(lons), max(lons)
         min_lat, max_lat = min(lats), max(lats)
         
-        # Calculate center latitude to adjust for longitude distance compression (simple spherical assumption)
         mid_lat = (min_lat + max_lat) / 2
-        
-        # Dimensions in degrees
         width_deg = max_lon - min_lon
         height_deg = max_lat - min_lat
         
-        # Aspect ratio corrected for latitude (Visual Aspect Ratio)
-        # We want the map to look like it does on a Mercator web map
-        # width_pixels / height_pixels ~ (width_deg * cos(lat)) / height_deg
         aspect_ratio = (width_deg * np.cos(np.radians(mid_lat))) / height_deg
         
-        # Set Figure Dimensions (Base width fixed, height adapts)
-        # We ensure height doesn't get too small or too huge
-        fig_width = 12 # inches
+        fig_width = 12 
         fig_height = fig_width / aspect_ratio
         
-        # Clamping height
         if fig_height > 20: fig_height = 20
         if fig_height < 4: fig_height = 4
 
@@ -397,8 +387,6 @@ def generate_static_map_display(image, roi, vis_params, title, cmap_colors=None,
         else:
             ready_img = image 
             
-        # Get Thumbnail with increased resolution
-        # We use a larger dimension to ensure quality on variable canvas sizes
         thumb_url = ready_img.getThumbURL({
             'region': roi,
             'dimensions': 1500, 
@@ -419,14 +407,13 @@ def generate_static_map_display(image, roi, vis_params, title, cmap_colors=None,
 
         img_pil = Image.open(BytesIO(response.content))
         
-        # 3. PLOT WITH DYNAMIC SIZE
-        fig, ax = plt.subplots(figsize=(fig_width, fig_height), dpi=300, facecolor='#050509')
-        ax.set_facecolor='#050509'
+        # 3. PLOT WITH DYNAMIC SIZE AND BLACK BACKGROUND
+        # Changed facecolor to #000000 for pure black
+        fig, ax = plt.subplots(figsize=(fig_width, fig_height), dpi=300, facecolor='#000000')
+        ax.set_facecolor='#000000'
         
-        # Use extent to map pixels to coordinates
         extent = [min_lon, max_lon, min_lat, max_lat]
         
-        # aspect='auto' fills the figure we manually sized to the correct aspect ratio
         im = ax.imshow(img_pil, extent=extent, aspect='auto')
         
         ax.set_title(title, fontsize=18, fontweight='bold', pad=20, color='#00f2ff')
@@ -442,11 +429,9 @@ def generate_static_map_display(image, roi, vis_params, title, cmap_colors=None,
             center_lat = (min_lat + max_lat) / 2
             met_per_deg_lon = 111320 * np.cos(np.radians(center_lat))
             
-            # Target length: 20% of map width
             width_met = width_deg * met_per_deg_lon
             target_len_met = width_met / 5
             
-            # Round to nice number
             order = 10 ** np.floor(np.log10(target_len_met))
             nice_len_met = round(target_len_met / order) * order
             nice_len_deg = nice_len_met / met_per_deg_lon
@@ -457,7 +442,6 @@ def generate_static_map_display(image, roi, vis_params, title, cmap_colors=None,
             start_x = max_lon - pad_x - nice_len_deg
             start_y = min_lat + pad_y
             
-            # Bar height proportional to map height
             bar_height = height_deg * 0.015
             
             rect = mpatches.Rectangle((start_x, start_y), nice_len_deg, bar_height, 
@@ -495,7 +479,8 @@ def generate_static_map_display(image, roi, vis_params, title, cmap_colors=None,
             plt.setp(plt.getp(cbar.ax.axes, 'yticklabels'), color='white', fontsize=10)
         
         buf = BytesIO()
-        plt.savefig(buf, format='jpg', bbox_inches='tight', facecolor='#050509')
+        # Changed facecolor to #000000 for pure black when saving
+        plt.savefig(buf, format='jpg', bbox_inches='tight', facecolor='#000000')
         buf.seek(0)
         plt.close(fig)
         return buf
