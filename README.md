@@ -2,7 +2,7 @@
 
 Geospatial Ni30 is a powerful web application built with Streamlit and Google Earth Engine (GEE) that allows users to perform real-time satellite analysis without writing code. It supports both Optical (Sentinel-2) and Radar (Sentinel-1) data for monitoring vegetation health, water bodies, and land changes.
 
-Website : https://niteshgulzar.streamlit.app/
+Website : (https://spectralni30.streamlit.app/)
 
 🚀 Features
 
