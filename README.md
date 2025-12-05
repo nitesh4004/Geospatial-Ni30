@@ -131,7 +131,6 @@ MIT License – See LICENSE file for details.
 
 **Author:** Nitesh Kumar  
 **Role:** Geospatial Data Scientist  
-**Email:** nitesh.kumar@swan.co.in  
 **GitHub:** [@nitesh4004](https://github.com/nitesh4004)  
 
 ---
