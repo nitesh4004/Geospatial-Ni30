@@ -242,19 +242,6 @@ SpecTralNi30 provides four advanced analysis workflows:
 
 ---
 
-### 📊 **Live Testing Results** (Central India: 20.59°N, 78.96°E)
-
-**NDVI Analysis:**
-- Mean: 0.597 | Max: 0.875 | Min: -0.796 | Std: 0.162
-- Scenes available: 10
-
-**LULC Results:**
-- Trees: 5,102.5 ha (53%) | Grass: 2,445 ha (25%)
-- Crops: 2,006 ha (21%) | Built: 303 ha (3%)
-- Water: 29 ha | Other: ~90 ha
-
----
-
 ### ✨ **Unique Capabilities**
 
 ✅ Multi-modal analysis (Optical + Radar)
