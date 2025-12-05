@@ -660,7 +660,11 @@ with st.sidebar:
 
     elif mode == "Geospatial-embeddings-use-cases":
         st.markdown("### 2. AI Embeddings Task")
-        embedding_task = st.selectbox("Select Task", ["LULC (Supervised with ESA Labels)", "Water/Change Detection (Unsupervised)"])
+        embedding_task = st.selectbox("Select Task", [
+            "LULC (Supervised with ESA Labels)", 
+            "Alpha Earth: Transfer Learning (Dynamic World)",
+            "Water/Change Detection (Unsupervised)"
+        ])
         embedding_year = st.slider("Target Year", 2017, 2024, 2023)
         st.caption(f"Using Google Satellite Embeddings (V1) for {embedding_year}")
         cloud = 0 # Embeddings don't use this directly in the same way
@@ -1169,7 +1173,7 @@ else:
         # Helper to visualize embeddings (RGB using PCA-like bands)
         # Bands are A00 to A63. We can just visualize A00, A01, A02
         emb_vis = {'min': -0.1, 'max': 0.1, 'bands': ['A00', 'A01', 'A02']}
-        m.addLayer(embeddings, emb_vis, f'Embeddings RGB {target_year}')
+        m.addLayer(embeddings, emb_vis, f'Alpha Earth RGB {target_year}')
 
         if p['embedding_task'] == "LULC (Supervised with ESA Labels)":
              with st.spinner("Generating LULC from Embeddings (ESA Ground Truth)..."):
@@ -1269,6 +1273,95 @@ else:
 
                 else:
                     st.error("Training data (2021 Embeddings) missing.")
+
+        elif p['embedding_task'] == "Alpha Earth: Transfer Learning (Dynamic World)":
+            # NEW MODE
+            with st.spinner("Training Alpha Earth Embeddings on Dynamic World Labels..."):
+                # 1. Load Dynamic World Labels for the SAME YEAR as embeddings
+                # This makes it better than ESA for multi-year analysis
+                dw_col = ee.ImageCollection("GOOGLE/DYNAMICWORLD/V1") \
+                    .filterDate(f'{target_year}-01-01', f'{target_year+1}-01-01') \
+                    .filterBounds(roi)
+
+                if dw_col.size().getInfo() > 0:
+                    # Get the most common class for the year (label band)
+                    dw_label = dw_col.select('label').mode().clip(roi)
+                    
+                    # 2. Combine Embeddings (Features) with DW (Labels)
+                    training_image = embeddings.addBands(dw_label.rename('label'))
+                    
+                    # 3. Sample points
+                    # Stratified sampling ensures we get examples of all classes present
+                    points = training_image.stratifiedSample(
+                        numPoints=1000,
+                        classBand='label',
+                        region=roi,
+                        scale=30,
+                        geometries=True
+                    )
+                    
+                    # 4. Train Classifier
+                    band_names = embeddings.bandNames()
+                    classifier = ee.Classifier.smileRandomForest(50).train(
+                        features=points,
+                        classProperty='label',
+                        inputProperties=band_names
+                    )
+                    
+                    # 5. Classify
+                    classified_dw = embeddings.classify(classifier)
+                    
+                    # 6. Visualization (Dynamic World Palette)
+                    dw_names = ['Water', 'Trees', 'Grass', 'Flooded Veg', 'Crops', 
+                                'Shrub/Scrub', 'Built', 'Bare', 'Snow/Ice']
+                    dw_vis = {
+                        "min": 0, "max": 8,
+                        "palette": [
+                            '#419bdf', '#397d49', '#88b053', '#7a87c6', '#e49635',
+                            '#dfc35a', '#c4281b', '#a59b8f', '#b39fe1'
+                        ]
+                    }
+                    
+                    m.addLayer(dw_label, dw_vis, "Dynamic World (Raw)", False) # Hidden by default
+                    m.addLayer(classified_dw, dw_vis, f"Alpha Earth LULC {target_year}")
+                    m.add_legend(title="Alpha Earth Classes", legend_dict=dict(zip(dw_names, dw_vis['palette'])))
+
+                    with col_res:
+                        st.markdown('<div class="glass-card">', unsafe_allow_html=True)
+                        st.markdown('<div class="card-label">🧠 SEMANTIC TRANSFER</div>', unsafe_allow_html=True)
+                        st.success(f"Year: {target_year}")
+                        st.info("Method: Semantic Embeddings trained on Dynamic World labels.")
+                        st.caption("Embeddings often smooth out noise found in raw optical classification.")
+                        
+                        st.markdown('<div class="card-label">📊 AREA STATS</div>', unsafe_allow_html=True)
+                        with st.spinner("Calculating areas..."):
+                             df_area = calculate_area_by_class(classified_dw, roi, 20, dw_names)
+                             if not df_area.empty:
+                                 st.dataframe(df_area, hide_index=True, use_container_width=True)
+                        
+                        st.markdown("---")
+                        if st.button("☁️ Export Map"):
+                            ee.batch.Export.image.toDrive(
+                                image=classified_dw, description=f"AlphaEarth_DW_{target_year}", 
+                                scale=20, region=roi, folder='GEE_Exports'
+                            ).start()
+                            st.toast("Export task started")
+                        
+                        st.markdown("---")
+                        map_title = st.text_input("Map Title", f"Alpha Earth LULC {target_year}")
+                        if st.button("📷 Render Map (JPG)"):
+                             with st.spinner("Generating Map..."):
+                                 buf = generate_static_map_display(
+                                     classified_dw, roi, dw_vis, map_title, 
+                                     is_categorical=True, class_names=dw_names
+                                 )
+                                 if buf:
+                                     st.download_button("⬇️ Save Image", buf, "Ni30_Alpha_LULC.jpg", "image/jpeg", use_container_width=True)
+                        st.markdown('</div>', unsafe_allow_html=True)
+
+                else:
+                    st.error(f"No Dynamic World labels found for {target_year} to train the embeddings.")
+
 
         elif p['embedding_task'] == "Water/Change Detection (Unsupervised)":
             with st.spinner("Running Unsupervised Clustering on Embeddings..."):
