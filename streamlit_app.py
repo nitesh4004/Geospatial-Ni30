@@ -22,7 +22,7 @@ from sklearn.metrics import accuracy_score, cohen_kappa_score
 
 # --- 1. PAGE CONFIG ---
 st.set_page_config(
-    page_title="NI30 Orbital Analytics", 
+    page_title="SpecTralNi30 Analytics", 
     page_icon="🛰️", 
     layout="wide",
     initial_sidebar_state="expanded"
@@ -407,10 +407,10 @@ def generate_static_map_display(image, roi, vis_params, title, cmap_colors=None,
 
         img_pil = Image.open(BytesIO(response.content))
         
-        # 3. PLOT WITH DYNAMIC SIZE AND BLACK BACKGROUND
-        # Changed facecolor to #000000 for pure black
+        # 3. PLOT WITH DYNAMIC SIZE AND PURE BLACK BACKGROUND
+        # Ensuring pure black background so white elements pop
         fig, ax = plt.subplots(figsize=(fig_width, fig_height), dpi=300, facecolor='#000000')
-        ax.set_facecolor='#000000'
+        ax.set_facecolor('#000000')
         
         extent = [min_lon, max_lon, min_lat, max_lat]
         
@@ -418,13 +418,23 @@ def generate_static_map_display(image, roi, vis_params, title, cmap_colors=None,
         
         ax.set_title(title, fontsize=18, fontweight='bold', pad=20, color='#00f2ff')
         
+        # Styling ticks for black background
         ax.tick_params(colors='white', labelcolor='white', labelsize=10)
         ax.grid(color='white', linestyle='--', linewidth=0.5, alpha=0.2)
         for spine in ax.spines.values():
             spine.set_edgecolor('white')
             spine.set_alpha(0.3)
         
-        # 4. SCALE BAR LOGIC
+        # 4. NORTH ARROW / DIRECTION MARKER
+        # Placed Top-Right relative to Axes (0.95, 0.95)
+        # Using annotate to draw arrow and 'N' text
+        ax.annotate('N', xy=(0.97, 0.95), xytext=(0.97, 0.88),
+                    xycoords='axes fraction', textcoords='axes fraction',
+                    arrowprops=dict(facecolor='white', edgecolor='white', width=4, headwidth=12, headlength=10),
+                    ha='center', va='center', fontsize=16, fontweight='bold', color='white',
+                    path_effects=[PathEffects.withStroke(linewidth=2, foreground="black")])
+
+        # 5. SCALE BAR LOGIC
         try:
             center_lat = (min_lat + max_lat) / 2
             met_per_deg_lon = 111320 * np.cos(np.radians(center_lat))
@@ -444,18 +454,21 @@ def generate_static_map_display(image, roi, vis_params, title, cmap_colors=None,
             
             bar_height = height_deg * 0.015
             
+            # White scale bar rectangle
             rect = mpatches.Rectangle((start_x, start_y), nice_len_deg, bar_height, 
                                     linewidth=1, edgecolor='white', facecolor='white')
             ax.add_patch(rect)
             
             label = f"{int(nice_len_met/1000)} km" if nice_len_met >= 1000 else f"{int(nice_len_met)} m"
+            
+            # Text label above scale bar
             ax.text(start_x + nice_len_deg/2, start_y + bar_height + (height_deg*0.01), label, 
                     color='white', ha='center', va='bottom', fontsize=12, fontweight='bold',
                     path_effects=[PathEffects.withStroke(linewidth=2, foreground="black")])
         except:
             pass
         
-        # 5. LEGEND LOGIC
+        # 6. LEGEND LOGIC
         if is_categorical and class_names and 'palette' in vis_params:
             patches = []
             for name, color in zip(class_names, vis_params['palette']):
@@ -479,7 +492,7 @@ def generate_static_map_display(image, roi, vis_params, title, cmap_colors=None,
             plt.setp(plt.getp(cbar.ax.axes, 'yticklabels'), color='white', fontsize=10)
         
         buf = BytesIO()
-        # Changed facecolor to #000000 for pure black when saving
+        # Crucial: Save with facecolor black so text is visible outside the axes
         plt.savefig(buf, format='jpg', bbox_inches='tight', facecolor='#000000')
         buf.seek(0)
         plt.close(fig)
@@ -496,7 +509,7 @@ def generate_static_map_display(image, roi, vis_params, title, cmap_colors=None,
 with st.sidebar:
     st.markdown("""
         <div style="margin-bottom: 20px;">
-            <h2 style="font-family: 'Rajdhani'; color: #fff; margin:0;">NI30</h2>
+            <h2 style="font-family: 'Rajdhani'; color: #fff; margin:0;">SpecTralNi30</h2>
             <p style="font-size: 0.8rem; color: #00f2ff; letter-spacing: 2px; margin:0;">GEOSPATIAL CORE</p>
         </div>
     """, unsafe_allow_html=True)
@@ -735,7 +748,7 @@ with st.sidebar:
 st.markdown("""
 <div class="hud-header">
     <div>
-        <div class="hud-title">NI30 ANALYTICS</div>
+        <div class="hud-title">SpecTralNi30 ANALYTICS</div>
         <div style="color:#94a3b8; font-size:0.9rem;">""" + st.session_state['mode'].upper() + """</div>
     </div>
     <div style="text-align:right;">
