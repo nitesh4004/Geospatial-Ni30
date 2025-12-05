@@ -410,7 +410,7 @@ def generate_static_map_display(image, roi, vis_params, title, cmap_colors=None,
         # 3. PLOT WITH DYNAMIC SIZE AND PURE BLACK BACKGROUND
         # Ensuring pure black background so white elements pop
         fig, ax = plt.subplots(figsize=(fig_width, fig_height), dpi=300, facecolor='#000000')
-        ax.set_facecolor='#000000')
+        ax.set_facecolor('#000000')
         
         extent = [min_lon, max_lon, min_lat, max_lat]
         
