@@ -568,6 +568,8 @@ with st.sidebar:
     slide_thresh, slope_thresh = 2.0, 15
     water_thresh = -18.0
     polarization = "VH"
+    flood_slope_thresh = 5
+    flood_smooth = 50
 
     if mode == "Spectral Monitor":
         st.markdown("### 2. Sensor Config")
@@ -702,6 +704,11 @@ with st.sidebar:
         # Parameters
         polarization = st.selectbox("Polarization", ["VH", "VV"], index=0)
         water_thresh = st.slider("Water Threshold (dB)", -30.0, -5.0, -18.0, 0.5, help="Pixels below this value are classified as water.")
+        
+        st.markdown("#### Advanced Filtering")
+        flood_slope_thresh = st.slider("Mask Slopes > X degrees", 0, 20, 5, help="Masks terrain (mountains) that mimic water.")
+        flood_smooth = st.slider("Smoothing (Speckle Filter)", 10, 100, 50, help="Higher = Cleaner but less detail.")
+        
         cloud = 0 # No clouds in SAR
 
     # Common Temporal Window (Only for non-SAR/Embeddings modes)
@@ -745,7 +752,9 @@ with st.sidebar:
                     'post_start': post_start.strftime("%Y-%m-%d"),
                     'post_end': post_end.strftime("%Y-%m-%d"),
                     'polarization': polarization,
-                    'water_thresh': water_thresh
+                    'water_thresh': water_thresh,
+                    'flood_slope_thresh': flood_slope_thresh,
+                    'flood_smooth': flood_smooth
                 })
             elif mode != "Geospatial-embeddings-use-cases":
                 params.update({
@@ -1472,62 +1481,72 @@ else:
             m.to_streamlit()
 
     # ==========================================
-    # MODE 5: FLOOD MAPPING (SAR)
+    # MODE 5: FLOOD MAPPING (SAR) - REFINED
     # ==========================================
     elif p['mode'] == "Flood Mapping (SAR)":
         col_map, col_res = st.columns([3, 1])
         m = geemap.Map(height=700, basemap="HYBRID")
         m.centerObject(roi, 13)
         
-        with st.spinner("🛰️ Processing Sentinel-1 Flood Data..."):
+        with st.spinner("🛰️ Processing Sentinel-1 Flood Data (Enhanced)..."):
             
-            # 1. Fetch Images
-            def get_s1(start, end, pol, roi):
+            # 1. Fetch Images (Pre-processed with Smoothing Slider)
+            def get_s1(start, end, pol, roi, smoothing):
                 col = (ee.ImageCollection('COPERNICUS/S1_GRD')
                         .filterDate(start, end)
                         .filterBounds(roi)
                         .filter(ee.Filter.listContains('transmitterReceiverPolarisation', pol))
                         .filter(ee.Filter.eq('instrumentMode', 'IW'))
                         .select(pol))
-                # Return filtered mosaic with speckle filtering
-                return col.mosaic().clip(roi).focal_median(50, 'circle', 'meters')
+                # Mosaic and apply variable speckle filtering based on slider
+                return col.mosaic().clip(roi).focal_median(smoothing, 'circle', 'meters')
 
-            baseline = get_s1(p['pre_start'], p['pre_end'], p['polarization'], roi)
-            flood_img = get_s1(p['post_start'], p['post_end'], p['polarization'], roi)
+            baseline = get_s1(p['pre_start'], p['pre_end'], p['polarization'], roi, p['flood_smooth'])
+            flood_img = get_s1(p['post_start'], p['post_end'], p['polarization'], roi, p['flood_smooth'])
 
             # 2. Convert to dB 
-            # Sentinel-1 GRD is typically provided as sigma0 (linear). Convert to dB: 10*log10(x)
             baseline_db = ee.Image(10).multiply(baseline.log10()).rename('Baseline_dB')
             flood_db = ee.Image(10).multiply(flood_img.log10()).rename('Flood_dB')
 
-            # 3. Water Detection Algorithm
-            # Water usually appears very dark in SAR (low backscatter)
-            # We identify water in the Flood Image, and also in the Baseline Image.
-            # Flood = (Water in Flood Image) AND (NOT Water in Baseline Image)
-            
-            water_mask_flood = flood_db.lt(p['water_thresh'])
-            water_mask_base = baseline_db.lt(p['water_thresh'])
-            
-            # Detected Flood Water (New water)
-            flood_only = water_mask_flood.And(water_mask_base.Not()).selfMask()
-            
-            # Permanent Water (Existing water)
-            perm_water = water_mask_base.selfMask()
+            # 3. Slope Masking (Crucial for reducing false positives on hills)
+            dem = ee.Image('NASA/NASADEM_HGT/001').select('elevation')
+            slope = ee.Terrain.slope(dem).clip(roi)
+            slope_mask = slope.lt(p['flood_slope_thresh'])
 
-            # 4. Visualization
-            # Layer 1: Baseline Image (Grey)
-            m.addLayer(baseline_db, {'min': -25, 'max': 0}, 'Baseline (dB)', False)
+            # 4. Water Detection Algorithm
+            # Strictly: Flood = (Wet NOW) AND (Dry BEFORE) AND (Not Steep)
             
-            # Layer 2: Flood Image (Grey) - Active by default to see context
-            m.addLayer(flood_db, {'min': -25, 'max': 0}, 'Flood Event (dB)', True)
+            # "Wet Now" = Post-event image < Threshold
+            water_now = flood_db.lt(p['water_thresh'])
             
-            # Layer 3: Permanent Water (Blue)
-            m.addLayer(perm_water, {'palette': ['#0b4a8b']}, 'Permanent Water')
+            # "Dry Before" = Pre-event image > Threshold
+            # This ensures we don't map permanent rivers/lakes as "Flood" (or we can separate them)
+            water_before = baseline_db.lt(p['water_thresh'])
             
-            # Layer 4: Flood Water (Cyan/Bright Blue)
-            m.addLayer(flood_only, {'palette': ['#00ffff']}, 'Detected Flood')
+            # FLOOD = (Water Now) AND (NOT Water Before) AND (Flat Terrain)
+            flood_only = water_now.And(water_before.Not()).And(slope_mask).selfMask()
+            
+            # PERMANENT WATER = (Water Before) AND (Water Now)
+            perm_water = water_now.And(water_before).selfMask()
 
-            # 5. Stats
+            # 5. JRC Reference Layer (Global Surface Water)
+            jrc = ee.Image("JRC/GSW1_4/GlobalSurfaceWater").select('occurrence').clip(roi)
+            jrc_water = jrc.gt(80).selfMask() # Water present >80% of the time historically
+
+            # 6. Visualization
+            # Layer 1: Flood Image context
+            m.addLayer(flood_db, {'min': -25, 'max': 0}, 'SAR Image (Post)', False)
+            
+            # Layer 2: JRC Reference (Historic)
+            m.addLayer(jrc_water, {'palette': ['#0000aa']}, 'JRC Historic Water (>80%)', False)
+            
+            # Layer 3: Permanent Water (from our SAR analysis)
+            m.addLayer(perm_water, {'palette': ['#0b4a8b']}, 'Permanent Water (SAR)')
+            
+            # Layer 4: Flood Water (Red for high visibility)
+            m.addLayer(flood_only, {'palette': ['#ff0000']}, '⚠️ INUNDATED AREAS')
+
+            # 7. Stats
             area_img = ee.Image.pixelArea().updateMask(flood_only)
             stats = area_img.reduceRegion(
                 reducer=ee.Reducer.sum(),
@@ -1541,14 +1560,15 @@ else:
             with col_res:
                 st.markdown('<div class="glass-card">', unsafe_allow_html=True)
                 st.markdown('<div class="card-label">🌊 FLOOD REPORT</div>', unsafe_allow_html=True)
-                st.info(f"Polarization: {p['polarization']}")
-                st.caption(f"Threshold: < {p['water_thresh']} dB")
+                
+                st.info(f"Pol: {p['polarization']} | Thresh: < {p['water_thresh']} dB")
+                st.caption(f"Terrain Mask: < {p['flood_slope_thresh']}° Slope")
 
                 if area_ha is not None:
                     st.markdown(f"""
                         <div style="margin: 15px 0;">
                             <div class="metric-sub">Flooded Area</div>
-                            <div class="metric-value" style="color:#00ffff;">{area_ha:.2f} ha</div>
+                            <div class="metric-value" style="color:#ff4b4b;">{area_ha:.2f} ha</div>
                         </div>
                     """, unsafe_allow_html=True)
                 else:
@@ -1568,21 +1588,20 @@ else:
                 map_title = st.text_input("Map Title", "Flood Inundation Map")
 
                 if st.button("📷 Save Map Report"):
-                     # We create a visualization that combines permanent water and flood for the static map
-                     # Create a categorical image: 0=bg, 1=perm, 2=flood
+                     # Create a categorical image for export: 
+                     # 1=Perm Water (Blue), 2=Flood (Red)
                      combined = ee.Image(0).byte() \
-                        .where(water_mask_base, 1) \
+                        .where(perm_water, 1) \
                         .where(flood_only, 2) \
                         .clip(roi)
                      
-                     # Update mask to hide background
                      combined = combined.updateMask(combined.gt(0))
                      
-                     vis_comb = {'min': 1, 'max': 2, 'palette': ['#0b4a8b', '#00ffff']} # Dark Blue, Cyan
+                     vis_comb = {'min': 1, 'max': 2, 'palette': ['#0b4a8b', '#ff0000']} 
 
                      buf = generate_static_map_display(
                          combined, roi, vis_comb, 
-                         map_title, is_categorical=True, class_names=["Perm. Water", "Flood Water"]
+                         map_title, is_categorical=True, class_names=["Perm. Water", "Flooded Area"]
                      )
                      if buf:
                          st.download_button("⬇️ Save Image", buf, "Ni30_FloodMap.jpg", "image/jpeg", use_container_width=True)
